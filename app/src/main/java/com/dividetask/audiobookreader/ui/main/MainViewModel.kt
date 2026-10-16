@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.dividetask.audiobookreader.audible.api.AudibleApiClient
 import com.dividetask.audiobookreader.audible.api.AudibleBook
+import com.dividetask.audiobookreader.audible.api.toEntity
 import com.dividetask.audiobookreader.audible.auth.AudibleTokenStore
 import com.dividetask.audiobookreader.audible.download.AudibleDownloadManager
 import com.dividetask.audiobookreader.audible.download.DownloadProgress
@@ -355,16 +356,4 @@ class MainViewModel @Inject constructor(
     }
 
     fun clearError() { _importError.value = null }
-
-    private fun AudibleBook.toEntity() = AudibleBookEntity(
-        asin = asin,
-        title = title,
-        author = authors?.firstOrNull()?.name ?: "Unknown Author",
-        narrator = narrators?.firstOrNull()?.name,
-        runtimeMinutes = runtimeLengthMin,
-        coverUrl = productImages?.image500 ?: productImages?.image1024,
-        seriesTitle = series?.firstOrNull()?.title,
-        seriesSequence = series?.firstOrNull()?.sequence,
-        purchaseDate = purchaseDate
-    )
 }

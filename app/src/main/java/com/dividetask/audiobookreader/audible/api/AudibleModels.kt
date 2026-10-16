@@ -1,5 +1,6 @@
 package com.dividetask.audiobookreader.audible.api
 
+import com.dividetask.audiobookreader.data.db.entity.AudibleBookEntity
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -37,4 +38,16 @@ data class AudibleSeries(
     val asin: String? = null,
     val title: String? = null,
     @SerialName("sequence") val sequence: String? = null
+)
+
+fun AudibleBook.toEntity() = AudibleBookEntity(
+    asin = asin,
+    title = title,
+    author = authors?.firstOrNull()?.name ?: "Unknown Author",
+    narrator = narrators?.firstOrNull()?.name,
+    runtimeMinutes = runtimeLengthMin,
+    coverUrl = productImages?.image500 ?: productImages?.image1024,
+    seriesTitle = series?.firstOrNull()?.title,
+    seriesSequence = series?.firstOrNull()?.sequence,
+    purchaseDate = purchaseDate
 )
