@@ -194,6 +194,59 @@ class AudibleApiClient @Inject constructor(
         }
     }
 
+    /**
+     * Fetches the chapter list for [asin]. Returns null data on failure (network/auth),
+     * or an empty list when Audible has no chapters for the title.
+     */
+    suspend fun getChapters(asin: String): ApiResult<List<AudibleChapter>> {
+        val log = mutableListOf<String>()
+        val locale = AudibleEndpoints.getLocale(tokenStore.locale)
+        val url = AudibleEndpoints.contentMetadataUrl(locale, asin)
+        val accessToken = tokenStore.accessToken
+        if (accessToken.isNullOrBlank()) {
+            log.add("ERROR: No access token")
+            return ApiResult(null, log)
+        }
+
+        val params = mapOf(
+            "response_groups" to "chapter_info",
+            "chapter_titles_type" to "Flat",
+            "drm_type" to "Adrm",
+            "quality" to "High"
+        )
+
+        return try {
+            var response = httpClient.get(url) {
+                header("x-amz-access-token", accessToken)
+                params.forEach { (k, v) -> parameter(k, v) }
+            }
+            if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
+                log.add("Got ${response.status}, refreshing token")
+                if (!authManager.refreshAccessToken()) return ApiResult(null, log)
+                response = httpClient.get(url) {
+                    header("x-amz-access-token", tokenStore.accessToken ?: "")
+                    params.forEach { (k, v) -> parameter(k, v) }
+                }
+            }
+            val responseText = response.bodyAsText()
+            log.add("Status: ${response.status}")
+            if (response.status != HttpStatusCode.OK) {
+                log.add("Response: ${responseText.take(300)}")
+                return ApiResult(null, log)
+            }
+            val chapters = json.decodeFromString<AudibleChapterResponse>(responseText)
+                .contentMetadata?.chapterInfo?.chapters.orEmpty()
+            ApiResult(flattenChapters(chapters), log)
+        } catch (e: Exception) {
+            log.add("EXCEPTION: ${e::class.simpleName}: ${e.message}")
+            Log.e("AudibleApi", "Chapter fetch failed for $asin", e)
+            ApiResult(null, log)
+        }
+    }
+
+    private fun flattenChapters(chapters: List<AudibleChapter>): List<AudibleChapter> =
+        chapters.flatMap { listOf(it.copy(chapters = null)) + flattenChapters(it.chapters.orEmpty()) }
+
     private fun decryptVoucher(asin: String, encryptedVoucher: String): String? {
         val deviceSerial = tokenStore.deviceSerial ?: return null
         val customerId = tokenStore.customerId ?: return null

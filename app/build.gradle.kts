@@ -7,6 +7,18 @@ plugins {
     id("com.google.dagger.hilt.android")
 }
 
+// First 4 characters of the commit being built, appended to versionName.
+val gitCommit: String = try {
+    ProcessBuilder("git", "rev-parse", "--short=4", "HEAD")
+        .directory(rootDir)
+        .start()
+        .inputStream.bufferedReader().readText().trim()
+        .take(4)
+        .ifEmpty { "dev" }
+} catch (e: Exception) {
+    "dev"
+}
+
 android {
     namespace = "com.dividetask.audiobookreader"
     compileSdk = 35
@@ -16,7 +28,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = (System.currentTimeMillis() / 60000).toInt()
-        versionName = "0.1"
+        versionName = "v0.101 a ($gitCommit)"
 
         buildConfigField("long", "BUILD_TIMESTAMP", "${System.currentTimeMillis()}L")
     }

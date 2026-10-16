@@ -38,3 +38,26 @@ data class AudibleSeries(
     val title: String? = null,
     @SerialName("sequence") val sequence: String? = null
 )
+
+@Serializable
+data class AudibleChapterResponse(
+    @SerialName("content_metadata") val contentMetadata: AudibleContentMetadata? = null
+)
+
+@Serializable
+data class AudibleContentMetadata(
+    @SerialName("chapter_info") val chapterInfo: AudibleChapterInfo? = null
+)
+
+@Serializable
+data class AudibleChapterInfo(
+    val chapters: List<AudibleChapter> = emptyList()
+)
+
+@Serializable
+data class AudibleChapter(
+    val title: String = "",
+    @SerialName("start_offset_ms") val startOffsetMs: Long = 0,
+    @SerialName("length_ms") val lengthMs: Long = 0,
+    val chapters: List<AudibleChapter>? = null
+)

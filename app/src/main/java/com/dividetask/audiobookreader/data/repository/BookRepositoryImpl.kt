@@ -43,4 +43,11 @@ class BookRepositoryImpl @Inject constructor(
     override fun getChapters(bookId: Long): Flow<List<ChapterEntity>> = chapterDao.getByBookId(bookId)
 
     override suspend fun getChaptersOnce(bookId: Long): List<ChapterEntity> = chapterDao.getByBookIdOnce(bookId)
+
+    override suspend fun replaceChapters(bookId: Long, chapters: List<ChapterEntity>) {
+        chapterDao.deleteByBookId(bookId)
+        chapterDao.insertAll(chapters.map { it.copy(id = 0, bookId = bookId) })
+    }
+
+    override suspend fun setChaptersChecked(bookId: Long) = bookDao.setChaptersChecked(bookId)
 }

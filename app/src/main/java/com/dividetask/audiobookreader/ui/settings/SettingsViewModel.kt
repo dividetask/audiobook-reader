@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.dividetask.audiobookreader.audible.auth.AudibleAuthManager
 import com.dividetask.audiobookreader.audible.auth.AudibleEndpoints
 import com.dividetask.audiobookreader.audible.auth.AudibleTokenStore
+import com.dividetask.audiobookreader.player.PlaybackPreferences
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,8 +17,15 @@ import javax.inject.Inject
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val tokenStore: AudibleTokenStore,
-    private val authManager: AudibleAuthManager
+    private val authManager: AudibleAuthManager,
+    private val playbackPreferences: PlaybackPreferences
 ) : ViewModel() {
+
+    val skipBackSeconds: StateFlow<Int> = playbackPreferences.skipBackSeconds
+    val skipForwardSeconds: StateFlow<Int> = playbackPreferences.skipForwardSeconds
+
+    fun setSkipBackSeconds(seconds: Int) = playbackPreferences.setSkipBackSeconds(seconds)
+    fun setSkipForwardSeconds(seconds: Int) = playbackPreferences.setSkipForwardSeconds(seconds)
 
     private var pendingSerial: String? = null
     private var pendingCodeVerifier: String? = null

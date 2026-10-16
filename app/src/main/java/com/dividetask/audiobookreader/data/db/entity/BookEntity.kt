@@ -14,5 +14,7 @@ data class BookEntity(
     val currentPositionMs: Long = 0,
     val currentChapterIndex: Int = 0,
     val dateAdded: Long = System.currentTimeMillis(),
-    val lastPlayed: Long = 0
+    val lastPlayed: Long = 0,
+    /** True once chapter extraction has run, so it isn't retried on every open. */
+    val chaptersChecked: Boolean = false
 )

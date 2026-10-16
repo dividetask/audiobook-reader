@@ -711,7 +711,7 @@ private fun MiniPlayerBar(
                     }
                 }
                 IconButton(onClick = onSkipForward) {
-                    Icon(Icons.Default.ArrowForward, contentDescription = "Skip 30s")
+                    Icon(Icons.Default.ArrowForward, contentDescription = "Skip forward")
                 }
             }
         }
