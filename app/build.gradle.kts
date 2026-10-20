@@ -26,7 +26,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = (System.currentTimeMillis() / 60000).toInt()
-        versionName = "v0.105 a" + if (gitCommit.isNotEmpty()) " ($gitCommit)" else ""
+        versionName = "v0.106 a" + if (gitCommit.isNotEmpty()) " ($gitCommit)" else ""
 
         buildConfigField("long", "BUILD_TIMESTAMP", "${System.currentTimeMillis()}L")
     }

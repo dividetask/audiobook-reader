@@ -3,7 +3,6 @@ package com.dividetask.audiobookreader.data.metadata
 import android.content.Context
 import android.net.Uri
 import com.arthenica.ffmpegkit.FFmpegKitConfig
-import com.arthenica.ffmpegkit.FFprobeKit
 import com.dividetask.audiobookreader.audible.api.AudibleApiClient
 import com.dividetask.audiobookreader.data.db.entity.BookEntity
 import com.dividetask.audiobookreader.data.db.entity.ChapterEntity
@@ -12,7 +11,6 @@ import com.dividetask.audiobookreader.debug.AppDebugLog
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -80,14 +78,7 @@ class ChapterLoader @Inject constructor(
             else -> uri.path ?: return emptyList()
         }
         return try {
-            val session = FFprobeKit.executeWithArguments(
-                arrayOf("-v", "error", "-hide_banner", "-print_format", "json", "-show_chapters", input)
-            )
-            val output = session.output ?: return emptyList()
-            val start = output.indexOf('{')
-            val end = output.lastIndexOf('}')
-            if (start < 0 || end <= start) return emptyList()
-            val array = JSONObject(output.substring(start, end + 1)).optJSONArray("chapters")
+            val array = ffprobeJson("-show_chapters", input)?.optJSONArray("chapters")
                 ?: return emptyList()
 
             (0 until array.length()).map { i ->

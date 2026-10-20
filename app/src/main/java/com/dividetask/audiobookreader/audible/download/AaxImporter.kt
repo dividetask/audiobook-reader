@@ -2,11 +2,11 @@ package com.dividetask.audiobookreader.audible.download
 
 import android.content.Context
 import android.net.Uri
-import com.arthenica.ffmpegkit.FFprobeKit
 import com.dividetask.audiobookreader.audible.auth.ActivationBytesProvider
 import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.data.db.entity.AudibleBookEntity
 import com.dividetask.audiobookreader.data.db.entity.BookEntity
+import com.dividetask.audiobookreader.data.metadata.ffprobeJson
 import com.dividetask.audiobookreader.data.repository.BookRepository
 import com.dividetask.audiobookreader.debug.AppDebugLog
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -19,7 +19,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.json.JSONObject
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -144,14 +143,7 @@ class AaxImporter @Inject constructor(
     /** AAX metadata (title, author, duration) is readable without decrypting. */
     private fun probeTags(file: File): Tags {
         return try {
-            val session = FFprobeKit.executeWithArguments(
-                arrayOf("-v", "error", "-hide_banner", "-print_format", "json", "-show_format", file.absolutePath)
-            )
-            val output = session.output ?: return Tags(null, null, null)
-            val start = output.indexOf('{')
-            val end = output.lastIndexOf('}')
-            if (start < 0 || end <= start) return Tags(null, null, null)
-            val format = JSONObject(output.substring(start, end + 1)).optJSONObject("format")
+            val format = ffprobeJson("-show_format", file.absolutePath)?.optJSONObject("format")
                 ?: return Tags(null, null, null)
             val tags = format.optJSONObject("tags")
             Tags(
