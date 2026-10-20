@@ -300,6 +300,42 @@ class AudibleApiClient @Inject constructor(
         }
     }
 
+    /**
+     * GET https://{api}/1.0/catalog/{path} — product details, series, reviews. Returns the
+     * raw JSON so callers can pick out whatever fields Audible sends.
+     */
+    suspend fun getCatalog(path: String, params: Map<String, String>): ApiResult<kotlinx.serialization.json.JsonObject> {
+        val log = mutableListOf<String>()
+        val locale = AudibleEndpoints.getLocale(tokenStore.locale)
+        val url = "https://${locale.apiDomain}/1.0/catalog/$path"
+        val accessToken = tokenStore.accessToken ?: ""
+        return try {
+            var response = httpClient.get(url) {
+                params.forEach { (k, v) -> parameter(k, v) }
+                authorize("GET", accessToken)
+            }
+            if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
+                log.add("Got ${response.status}, refreshing token")
+                if (authManager.refreshAccessToken()) {
+                    response = httpClient.get(url) {
+                        params.forEach { (k, v) -> parameter(k, v) }
+                        authorize("GET", tokenStore.accessToken ?: "", sign = false)
+                    }
+                }
+            }
+            val text = response.bodyAsText()
+            log.add("GET catalog/$path: ${response.status}")
+            if (response.status != HttpStatusCode.OK) {
+                log.add("Response: ${text.take(300)}")
+                return ApiResult(null, log, "Audible catalog: ${response.status} ${text.take(200)}")
+            }
+            ApiResult(json.parseToJsonElement(text).jsonObject, log)
+        } catch (e: Exception) {
+            log.add("EXCEPTION: ${e::class.simpleName}: ${e.message}")
+            ApiResult(null, log, "Audible catalog: ${e.message}")
+        }
+    }
+
     private fun flattenChapters(chapters: List<AudibleChapter>): List<AudibleChapter> =
         chapters.flatMap { listOf(it.copy(chapters = null)) + flattenChapters(it.chapters.orEmpty()) }
 

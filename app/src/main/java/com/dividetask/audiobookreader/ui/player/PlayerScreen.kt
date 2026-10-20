@@ -73,6 +73,7 @@ import java.util.Locale
 fun PlayerScreen(
     bookId: Long,
     onBack: () -> Unit,
+    onDetails: (asin: String) -> Unit,
     viewModel: PlayerViewModel = hiltViewModel()
 ) {
     val book by viewModel.book.collectAsState()
@@ -105,6 +106,13 @@ fun PlayerScreen(
                     }
                     TextButton(onClick = { showHistory = true }) {
                         Text("History")
+                    }
+                    // Audible books are stored as {asin}.m4b etc.
+                    val asin = book?.fileUri
+                        ?.let { android.net.Uri.parse(it).path?.substringAfterLast('/')?.substringBeforeLast('.') }
+                        ?.takeIf { Regex("^[A-Z0-9]{10}$").matches(it) }
+                    TextButton(onClick = { asin?.let(onDetails) }, enabled = asin != null) {
+                        Text("Details")
                     }
                 }
             )

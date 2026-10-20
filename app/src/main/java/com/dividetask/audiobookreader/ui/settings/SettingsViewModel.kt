@@ -18,8 +18,21 @@ import javax.inject.Inject
 class SettingsViewModel @Inject constructor(
     private val tokenStore: AudibleTokenStore,
     private val authManager: AudibleAuthManager,
-    private val playbackPreferences: PlaybackPreferences
+    private val playbackPreferences: PlaybackPreferences,
+    private val serviceKeys: com.dividetask.audiobookreader.data.details.ServiceKeys
 ) : ViewModel() {
+
+    var hardcoverToken: String
+        get() = serviceKeys.hardcoverToken
+        set(value) { serviceKeys.hardcoverToken = value }
+
+    var spotifyClientId: String
+        get() = serviceKeys.spotifyClientId
+        set(value) { serviceKeys.spotifyClientId = value }
+
+    var spotifyClientSecret: String
+        get() = serviceKeys.spotifyClientSecret
+        set(value) { serviceKeys.spotifyClientSecret = value }
 
     val skipBackSeconds: StateFlow<Int> = playbackPreferences.skipBackSeconds
     val skipForwardSeconds: StateFlow<Int> = playbackPreferences.skipForwardSeconds

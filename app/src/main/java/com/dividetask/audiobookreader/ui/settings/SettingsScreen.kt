@@ -216,6 +216,34 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // === Book info services ===
+            Text("Book Info Services", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Hardcover (reviews)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "hardcover.app → Settings → Hardcover API → copy the token. It expires after a year.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    KeyField("API token", viewModel.hardcoverToken) { viewModel.hardcoverToken = it }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Spotify (store availability)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "developer.spotify.com → Dashboard → Create app → copy the Client ID and Client secret.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    KeyField("Client ID", viewModel.spotifyClientId) { viewModel.spotifyClientId = it }
+                    KeyField("Client secret", viewModel.spotifyClientSecret) { viewModel.spotifyClientSecret = it }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
             // === Download Settings ===
             Text("Download Settings", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
@@ -370,5 +398,19 @@ private fun SecondsField(
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = modifier
+    )
+}
+
+/** Single-line secret field; saves on every change. */
+@Composable
+private fun KeyField(label: String, initial: String, onChange: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { text = it; onChange(it) },
+        label = { Text(label) },
+        singleLine = true,
+        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
     )
 }

@@ -14,6 +14,7 @@ import com.dividetask.audiobookreader.debug.AppDebugLog
 import com.dividetask.audiobookreader.ui.audible.AudibleLoginScreen
 import com.dividetask.audiobookreader.ui.audible.AudibleViewModel
 import com.dividetask.audiobookreader.ui.main.MainScreen
+import com.dividetask.audiobookreader.ui.details.BookDetailsScreen
 import com.dividetask.audiobookreader.ui.player.PlayerScreen
 import com.dividetask.audiobookreader.ui.settings.DebugLogScreen
 import com.dividetask.audiobookreader.ui.settings.SettingsScreen
@@ -43,7 +44,23 @@ fun AppNavigation(debugLog: AppDebugLog) {
             val bookId = backStackEntry.arguments?.getLong("bookId") ?: return@composable
             PlayerScreen(
                 bookId = bookId,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onDetails = { asin -> navController.navigate("details/$asin") }
+            )
+        }
+        composable(
+            "details/{asin}",
+            arguments = listOf(navArgument("asin") { type = NavType.StringType })
+        ) {
+            BookDetailsScreen(
+                onBack = { navController.popBackStack() },
+                onPlay = { id ->
+                    // Go back to the player if it's already open for this book
+                    if (!navController.popBackStack("player/$id", inclusive = false)) {
+                        navController.navigate("player/$id")
+                    }
+                },
+                onOpenBook = { asin -> navController.navigate("details/$asin") }
             )
         }
         composable("settings") {
