@@ -190,13 +190,22 @@ fun MainScreen(
 
             aaxImport?.takeIf { !it.finished }?.let { status ->
                 Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    val percent = status.progress?.let { " ${(it * 100).toInt()}%" } ?: "…"
                     Text(
-                        "Importing ${status.title} — ${status.step}…",
+                        "Importing ${status.title} — ${status.step}$percent",
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                    val fraction = status.progress
+                    if (fraction != null) {
+                        LinearProgressIndicator(
+                            progress = { fraction },
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                    }
                 }
             }
 

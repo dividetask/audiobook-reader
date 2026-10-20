@@ -27,7 +27,9 @@ data class AaxImportStatus(
     val title: String,
     val step: String,
     /** True once the import has succeeded or failed; [step] is then the result message. */
-    val finished: Boolean = false
+    val finished: Boolean = false,
+    /** 0..1 for the current step, or null when it can't be measured. */
+    val progress: Float? = null
 )
 
 /**
@@ -75,6 +77,14 @@ class AaxImporter @Inject constructor(
             debugLog.log("IMPORT", text)
             _status.value = AaxImportStatus(title, text)
         }
+        var lastProgressAt = 0L
+        fun progress(text: String, fraction: Float) {
+            // Callbacks arrive many times a second; update the UI a few times a second
+            val now = System.currentTimeMillis()
+            if (now - lastProgressAt < 250 && fraction < 1f) return
+            lastProgressAt = now
+            _status.value = AaxImportStatus(title, text, progress = fraction)
+        }
         fun fail(text: String) {
             debugLog.log("IMPORT", "FAILED: $text")
             _status.value = AaxImportStatus(title, "Import failed: $text", finished = true)
@@ -84,8 +94,19 @@ class AaxImporter @Inject constructor(
         try {
             step("Copying")
             val copy = File(importDir, "import.aax")
+            val size = fileSize(uri)
             context.contentResolver.openInputStream(uri)?.use { input ->
-                copy.outputStream().use { input.copyTo(it, 1 shl 20) }
+                copy.outputStream().use { output ->
+                    val buffer = ByteArray(1 shl 20)
+                    var copied = 0L
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        output.write(buffer, 0, n)
+                        copied += n
+                        if (size > 0) progress("Copying", copied.toFloat() / size)
+                    }
+                }
             } ?: return fail("Could not open the file")
             debugLog.log("IMPORT", "Copied ${copy.length() / 1_048_576}MB")
 
@@ -111,7 +132,7 @@ class AaxImporter @Inject constructor(
             copy.renameTo(aax)
 
             step("Converting")
-            val converted = converter.convert(aax, activationBytes)
+            val converted = converter.convert(aax, activationBytes) { progress("Converting", it) }
                 ?: return fail("Conversion failed — see the debug log")
             aax.delete()
 
@@ -137,6 +158,10 @@ class AaxImporter @Inject constructor(
             fail("${e::class.simpleName}: ${e.message}")
         }
     }
+
+    private fun fileSize(uri: Uri): Long =
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)
+            ?.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else -1L } ?: -1L
 
     private data class Tags(val title: String?, val artist: String?, val durationMs: Long?)
 
