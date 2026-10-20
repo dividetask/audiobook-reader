@@ -53,6 +53,9 @@ class PlaybackService : MediaSessionService() {
     private var chapterPlayer: ChapterProgressPlayer? = null
     private val playingBookId = MutableStateFlow(-1L)
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    // DB writes run here, not in serviceScope: onDestroy cancels serviceScope, which
+    // used to drop the final position save before it ran.
+    private val persistScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var positionSaveJob: Job? = null
 
     /** The listening span in progress; written to the DB once it lasts [MIN_SESSION_MS]. */
@@ -271,7 +274,7 @@ class PlaybackService : MediaSessionService() {
         if (bookId < 0) return
         val player = exoPlayer ?: return
         val positionMs = player.currentPosition
-        serviceScope.launch {
+        persistScope.launch {
             val chapters = bookRepository.getChaptersOnce(bookId)
             val chapterIndex = chapters.indexOfLast { it.startPositionMs <= positionMs }.coerceAtLeast(0)
             bookRepository.updatePosition(bookId, positionMs, chapterIndex)
@@ -297,7 +300,7 @@ class PlaybackService : MediaSessionService() {
         session ?: return
         val now = System.currentTimeMillis()
         if (session.rowId < 0 && now - session.startedAt < MIN_SESSION_MS) return
-        serviceScope.launch {
+        persistScope.launch {
             sessionMutex.withLock {
                 if (session.rowId < 0) {
                     session.rowId = historyRepository.insertSession(

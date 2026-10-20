@@ -148,9 +148,11 @@ class PlaybackController @Inject constructor(
 
         // Pause first so the service closes the previous book's listen session at the right position.
         if (controller.isPlaying) controller.pause()
-        controller.setMediaItem(mediaItem)
+        // Start position goes with the item: a separate seekTo right after setMediaItem
+        // is dropped while the item is still loading (seek command not yet available),
+        // which made books restart from the beginning.
+        controller.setMediaItem(mediaItem, startPositionMs)
         controller.prepare()
-        controller.seekTo(startPositionMs)
         controller.play()
         debugLog.log("PLAY", "Play command sent")
     }
