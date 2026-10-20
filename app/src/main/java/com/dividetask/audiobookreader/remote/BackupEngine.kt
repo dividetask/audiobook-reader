@@ -152,6 +152,9 @@ class BackupEngine @Inject constructor(
                 debugLog.log("BACKUP", "Backed up: ${book.title}")
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                if (e is AudibleThrottledException) {
+                    return finish(BackupOutcome.Failed(e.message ?: "Throttled by Audible", retry = true))
+                }
                 failed++
                 val count = (settings.failures[book.asin] ?: 0) + 1
                 settings.failures = settings.failures + (book.asin to count)
@@ -205,8 +208,12 @@ class BackupEngine @Inject constructor(
         }
 
         val output = converted ?: run {
-            val info = apiClient.getDownloadUrl(book.asin).data
-                ?: throw IOException("Could not get download URL")
+            val result = apiClient.getDownloadUrl(book.asin)
+            val info = result.data ?: run {
+                // A throttle applies to every book, so stop the run rather than burn through the list
+                if (apiClient.isThrottled) throw AudibleThrottledException(apiClient.throttleMessage())
+                throw IOException(result.error ?: "Could not get download URL")
+            }
             downloadAax(info.url, aax, title, remaining)
 
             setStatus(BackupStatus(BackupPhase.CONVERTING, title, remaining = remaining))
@@ -328,3 +335,6 @@ class BackupEngine @Inject constructor(
         const val MAX_FAILURES = 5
     }
 }
+
+/** Audible is refusing license requests for now; retrying other books won't help. */
+class AudibleThrottledException(message: String) : IOException(message)

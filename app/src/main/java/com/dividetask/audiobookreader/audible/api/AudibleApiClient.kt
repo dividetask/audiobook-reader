@@ -18,6 +18,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -26,7 +27,9 @@ import javax.inject.Singleton
 
 data class ApiResult<T>(
     val data: T?,
-    val debugLog: List<String>
+    val debugLog: List<String>,
+    /** User-facing reason when [data] is null, if known. */
+    val error: String? = null
 )
 
 data class DownloadInfo(
@@ -43,6 +46,23 @@ class AudibleApiClient @Inject constructor(
     private val debugLog: AppDebugLog
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * Set when Audible answers a license request with CustomerThrottled. License
+     * requests are skipped until then, since each retry can extend the throttle.
+     */
+    @Volatile
+    var throttledUntil: Long = 0
+        private set
+
+    val isThrottled: Boolean
+        get() = System.currentTimeMillis() < throttledUntil
+
+    fun throttleMessage(): String {
+        val until = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
+            .format(java.util.Date(throttledUntil))
+        return "Audible is limiting download requests for your account. Try again after $until."
+    }
 
     suspend fun getLibrary(): ApiResult<List<AudibleBook>> {
         debugLog.section("Library Fetch")
@@ -138,6 +158,11 @@ class AudibleApiClient @Inject constructor(
             return ApiResult(null, log)
         }
 
+        if (isThrottled) {
+            log.add("Skipped license request — throttled by Audible")
+            return ApiResult(null, log, throttleMessage())
+        }
+
         val url = AudibleEndpoints.contentUrl(locale, asin)
         log.add("License URL: $url")
 
@@ -177,7 +202,7 @@ class AudibleApiClient @Inject constructor(
                         log.add("Retry response: ${retryText.take(500)}")
                         val retryInfo = extractDownloadInfo(retryText)
                         log.add("Download URL: ${retryInfo?.url?.take(100) ?: "NOT FOUND"}")
-                        return ApiResult(retryInfo, log)
+                        return ApiResult(retryInfo, log, if (retryInfo == null) licenseError(retryText, log) else null)
                     }
                 }
                 return ApiResult(null, log)
@@ -186,7 +211,7 @@ class AudibleApiClient @Inject constructor(
             val info = extractDownloadInfo(responseText)
             log.add("Download URL: ${info?.url?.take(100) ?: "NOT FOUND"}")
             if (info?.key != null) log.add("Decryption key: present")
-            ApiResult(info, log)
+            ApiResult(info, log, if (info == null) licenseError(responseText, log) else null)
         } catch (e: Exception) {
             log.add("EXCEPTION: ${e::class.simpleName}: ${e.message}")
             Log.e("AudibleApi", "Failed to get download URL for $asin", e)
@@ -270,6 +295,39 @@ class AudibleApiClient @Inject constructor(
         return plaintext
     }
 
+    /**
+     * Logs every license_denial_reasons entry and returns a user-facing message.
+     * Audible lists every check that failed, so "not part of any plans" shows up
+     * even for purchased books; the Ownership entry is the one that matters.
+     */
+    private fun licenseError(responseText: String, log: MutableList<String>): String {
+        val reasons = try {
+            json.parseToJsonElement(responseText).jsonObject["content_license"]?.jsonObject
+                ?.get("license_denial_reasons")?.jsonArray
+                ?.map { it.jsonObject }
+                .orEmpty()
+        } catch (e: Exception) {
+            emptyList()
+        }
+        reasons.forEach { r ->
+            val type = r["validationType"]?.jsonPrimitive?.content
+            val reason = r["rejectionReason"]?.jsonPrimitive?.content
+            val message = r["message"]?.jsonPrimitive?.content
+            log.add("Denied [$type] $reason: $message")
+            debugLog.log("API", "Denied [$type] $reason: $message")
+        }
+        val codes = reasons.mapNotNull { it["rejectionReason"]?.jsonPrimitive?.content }
+        return when {
+            "CustomerThrottled" in codes -> {
+                throttledUntil = System.currentTimeMillis() + THROTTLE_COOLDOWN_MS
+                debugLog.log("API", "Throttled — skipping license requests for ${THROTTLE_COOLDOWN_MS / 60_000} min")
+                throttleMessage()
+            }
+            codes.isNotEmpty() -> "Audible refused the download: ${codes.joinToString()}"
+            else -> "Audible did not return a download link"
+        }
+    }
+
     private fun extractDownloadInfo(responseText: String): DownloadInfo? {
         return try {
             val responseJson = json.parseToJsonElement(responseText).jsonObject
@@ -314,5 +372,9 @@ class AudibleApiClient @Inject constructor(
             debugLog.log("API", "Parse error: ${e::class.simpleName}: ${e.message}")
             null
         }
+    }
+
+    companion object {
+        private const val THROTTLE_COOLDOWN_MS = 15 * 60_000L
     }
 }

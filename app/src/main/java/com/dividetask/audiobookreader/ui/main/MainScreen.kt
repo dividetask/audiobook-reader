@@ -51,6 +51,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -108,6 +109,14 @@ fun MainScreen(
         importError?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearError()
+        }
+    }
+
+    // Download failures (e.g. Audible throttling) are otherwise silent on the Audible tab
+    LaunchedEffect(downloadProgress?.state, downloadProgress?.message) {
+        val progress = downloadProgress
+        if (progress?.state == DownloadState.ERROR && progress.message != null) {
+            snackbarHostState.showSnackbar(progress.message)
         }
     }
 
@@ -170,50 +179,65 @@ fun MainScreen(
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
 
-            when (selectedTab) {
-                0 -> LocalBooksList(
-                    books = localBooks,
-                    onBookClick = onBookClick,
-                    onDelete = { bookToDelete = it },
-                    onDeleteConvertedFile = { viewModel.deleteConvertedFile(it) },
-                    onDeleteAaxFile = { viewModel.deleteAaxFile(it) },
-                    onConvert = { viewModel.retryConversion(it.id) },
-                    onDownloadAax = { viewModel.redownloadAax(it) },
-                    fileChecker = { viewModel.checkFiles(it) },
-                    onCancelDownload = { viewModel.cancelDownload() },
-                    convertingBookId = convertingBookId,
-                    downloadProgress = downloadProgress,
-                    queuedAsins = queuedAsins,
-                    queuedTitle = { viewModel.getQueuedTitle(it) }
-                )
-                1 -> {
-                    if (!viewModel.isAudibleAuthenticated) {
-                        NotSignedInView(onLogin = onAudibleLogin)
-                    } else {
-                        AudibleBooksList(
-                            books = audibleBooks,
+            val tabContent: @Composable () -> Unit = {
+                when (selectedTab) {
+                    0 -> LocalBooksList(
+                        books = localBooks,
+                        onBookClick = onBookClick,
+                        onDelete = { bookToDelete = it },
+                        onDeleteConvertedFile = { viewModel.deleteConvertedFile(it) },
+                        onDeleteAaxFile = { viewModel.deleteAaxFile(it) },
+                        onConvert = { viewModel.retryConversion(it.id) },
+                        onDownloadAax = { viewModel.redownloadAax(it) },
+                        fileChecker = { viewModel.checkFiles(it) },
+                        onCancelDownload = { viewModel.cancelDownload() },
+                        convertingBookId = convertingBookId,
+                        downloadProgress = downloadProgress,
+                        queuedAsins = queuedAsins,
+                        queuedTitle = { viewModel.getQueuedTitle(it) }
+                    )
+                    1 -> {
+                        if (!viewModel.isAudibleAuthenticated) {
+                            NotSignedInView(onLogin = onAudibleLogin)
+                        } else {
+                            AudibleBooksList(
+                                books = audibleBooks,
+                                downloadProgress = downloadProgress,
+                                queuedAsins = queuedAsins,
+                                isDownloaded = { viewModel.isBookDownloaded(it) },
+                                onDownload = { viewModel.downloadAudibleBook(it) },
+                                onDelete = { audibleBookToDelete = it }
+                            )
+                        }
+                    }
+                    2 -> ServerLibraryTab(onOpenSettings = onSettingsClick)
+                    3 -> {
+                        AllBooksList(
+                            localBooks = localBooks,
+                            audibleBooks = if (viewModel.isAudibleAuthenticated) audibleBooks else emptyList(),
+                            onLocalBookClick = onBookClick,
+                            onLocalBookDelete = { bookToDelete = it },
                             downloadProgress = downloadProgress,
-                            queuedAsins = queuedAsins,
                             isDownloaded = { viewModel.isBookDownloaded(it) },
                             onDownload = { viewModel.downloadAudibleBook(it) },
-                            onDelete = { audibleBookToDelete = it }
+                            onLogin = onAudibleLogin,
+                            isAuthenticated = viewModel.isAudibleAuthenticated
                         )
                     }
                 }
-                2 -> ServerLibraryTab(onOpenSettings = onSettingsClick)
-                3 -> {
-                    AllBooksList(
-                        localBooks = localBooks,
-                        audibleBooks = if (viewModel.isAudibleAuthenticated) audibleBooks else emptyList(),
-                        onLocalBookClick = onBookClick,
-                        onLocalBookDelete = { bookToDelete = it },
-                        downloadProgress = downloadProgress,
-                        isDownloaded = { viewModel.isBookDownloaded(it) },
-                        onDownload = { viewModel.downloadAudibleBook(it) },
-                        onLogin = onAudibleLogin,
-                        isAuthenticated = viewModel.isAudibleAuthenticated
-                    )
+            }
+
+            // Pull down on the Audible lists to re-sync the library with Amazon
+            if (selectedTab == 1 || selectedTab == 3) {
+                PullToRefreshBox(
+                    isRefreshing = isSyncing,
+                    onRefresh = { viewModel.syncAudibleLibrary() },
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    tabContent()
                 }
+            } else {
+                tabContent()
             }
         }
     }

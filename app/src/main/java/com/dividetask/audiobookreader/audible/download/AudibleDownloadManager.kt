@@ -46,7 +46,8 @@ data class DownloadProgress(
     val totalBytes: Long,
     val state: DownloadState,
     val coverUrl: String? = null,
-    val debugLog: List<String> = emptyList()
+    val debugLog: List<String> = emptyList(),
+    val message: String? = null
 )
 
 enum class DownloadState {
@@ -152,6 +153,15 @@ class AudibleDownloadManager @Inject constructor(
     private var activeAsin: String? = null
 
     fun queueDownload(book: AudibleBook) {
+        if (apiClient.isThrottled) {
+            // Don't add to the throttle by retrying; tell the user instead
+            debugLog.log("DL", "Not queued (throttled): ${book.title}")
+            _downloadProgress.value = DownloadProgress(
+                book.asin, book.title, 0, 0, DownloadState.ERROR,
+                message = apiClient.throttleMessage()
+            )
+            return
+        }
         if (downloadQueue.any { it.asin == book.asin }) return
         if (activeAsin == book.asin) return
         if (_queuedAsins.value.contains(book.asin)) return
@@ -204,7 +214,13 @@ class AudibleDownloadManager @Inject constructor(
             waitForWifi()
         }
 
-        var downloadInfo = fetchDownloadInfo(asin, log) ?: return
+        var downloadInfo = fetchDownloadInfo(asin, log) ?: run {
+            _downloadProgress.value = DownloadProgress(
+                asin, title, 0, 0, DownloadState.ERROR, bookCoverUrl, log,
+                message = lastLicenseError ?: "Could not get a download link from Audible"
+            )
+            return
+        }
         var downloadUrl = downloadInfo.url
         var audibleKey = downloadInfo.key
         var audibleIv = downloadInfo.iv
@@ -439,14 +455,17 @@ class AudibleDownloadManager @Inject constructor(
         notificationManager.notify(id, notification)
     }
 
+    private var lastLicenseError: String? = null
+
     private suspend fun fetchDownloadInfo(asin: String, log: MutableList<String>): com.dividetask.audiobookreader.audible.api.DownloadInfo? {
         fun dl(msg: String) { log.add(msg); debugLog.log("DL", msg) }
         dl("Getting download URL...")
         val result = apiClient.getDownloadUrl(asin)
         result.debugLog.forEach { debugLog.log("DL", it) }
         val info = result.data
+        lastLicenseError = result.error
         if (info == null) {
-            dl("ERROR: No download URL obtained")
+            dl("ERROR: No download URL obtained${result.error?.let { " — $it" } ?: ""}")
             return null
         }
         dl("Download URL: ${info.url.take(100)}...")
