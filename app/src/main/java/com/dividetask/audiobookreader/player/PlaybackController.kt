@@ -41,6 +41,14 @@ class PlaybackController @Inject constructor(
     private val historyRepository: HistoryRepository
 ) {
     private var mediaController: MediaController? = null
+
+    /**
+     * Positions and seeks go to the real player: the session's player reports
+     * chapter-relative values for the lock screen (see ChapterProgressPlayer).
+     * Falls back to the controller until the service has created the player.
+     */
+    private val player: Player?
+        get() = PlayerHolder.player ?: mediaController
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private val _playbackState = MutableStateFlow(PlaybackState())
@@ -160,27 +168,27 @@ class PlaybackController @Inject constructor(
 
     /** Seeks and records the jump in the listen history so the user can get back. */
     fun seekTo(positionMs: Long, reason: String = "Seek") {
-        val controller = mediaController ?: return
-        val from = controller.currentPosition
-        val duration = controller.duration
+        val player = player ?: return
+        val from = player.currentPosition
+        val duration = player.duration
         val target = if (duration > 0) positionMs.coerceIn(0, duration) else positionMs.coerceAtLeast(0)
         debugLog.log("USER", "$reason to ${target / 1000}s", AppDebugLog.LogLevel.VERBOSE)
-        controller.seekTo(target)
+        player.seekTo(target)
         updateState()
         val bookId = _playbackState.value.bookId
         scope.launch { historyRepository.recordJump(bookId, from, target, reason) }
     }
 
     fun skipForward() {
-        val controller = mediaController ?: return
+        val player = player ?: return
         val seconds = playbackPreferences.skipForwardSeconds.value
-        seekTo(controller.currentPosition + seconds * 1000L, "Skip forward")
+        seekTo(player.currentPosition + seconds * 1000L, "Skip forward")
     }
 
     fun skipBackward() {
-        val controller = mediaController ?: return
+        val player = player ?: return
         val seconds = playbackPreferences.skipBackSeconds.value
-        seekTo(controller.currentPosition - seconds * 1000L, "Skip back")
+        seekTo(player.currentPosition - seconds * 1000L, "Skip back")
     }
 
     fun setPlaybackSpeed(speed: Float) {
@@ -189,18 +197,19 @@ class PlaybackController @Inject constructor(
     }
 
     fun updateState() {
-        val controller = mediaController ?: return
+        if (mediaController == null) return
+        val player = player ?: return
         _playbackState.value = _playbackState.value.copy(
-            isPlaying = controller.isPlaying,
-            currentPositionMs = controller.currentPosition,
-            durationMs = controller.duration.coerceAtLeast(0),
-            playbackSpeed = controller.playbackParameters.speed,
-            currentMediaItemIndex = controller.currentMediaItemIndex,
-            title = controller.mediaMetadata.title?.toString() ?: "",
-            author = controller.mediaMetadata.artist?.toString() ?: ""
+            isPlaying = player.isPlaying,
+            currentPositionMs = player.currentPosition,
+            durationMs = player.duration.coerceAtLeast(0),
+            playbackSpeed = player.playbackParameters.speed,
+            currentMediaItemIndex = player.currentMediaItemIndex,
+            title = player.mediaMetadata.title?.toString() ?: "",
+            author = player.mediaMetadata.artist?.toString() ?: ""
         )
     }
 
-    fun getCurrentPosition(): Long = mediaController?.currentPosition ?: 0
-    fun getDuration(): Long = mediaController?.duration?.coerceAtLeast(0) ?: 0
+    fun getCurrentPosition(): Long = player?.currentPosition ?: 0
+    fun getDuration(): Long = player?.duration?.coerceAtLeast(0) ?: 0
 }
