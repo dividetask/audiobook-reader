@@ -9,14 +9,12 @@ plugins {
 
 // First 4 characters of the commit being built, appended to versionName.
 val gitCommit: String = try {
-    ProcessBuilder("git", "rev-parse", "--short=4", "HEAD")
+    ProcessBuilder("git", "rev-parse", "HEAD")
         .directory(rootDir)
         .start()
-        .inputStream.bufferedReader().readText().trim()
-        .take(4)
-        .ifEmpty { "dev" }
+        .inputStream.bufferedReader().readText().trim().take(4)
 } catch (e: Exception) {
-    "dev"
+    ""
 }
 
 android {
@@ -28,7 +26,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = (System.currentTimeMillis() / 60000).toInt()
-        versionName = "v0.101 a ($gitCommit)"
+        versionName = "v0.102 a" + if (gitCommit.isNotEmpty()) " ($gitCommit)" else ""
 
         buildConfigField("long", "BUILD_TIMESTAMP", "${System.currentTimeMillis()}L")
     }
@@ -76,6 +74,7 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        resources.excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
     }
 }
 
@@ -126,6 +125,14 @@ dependencies {
 
     // WebView for Audible login
     implementation("androidx.webkit:webkit:1.12.1")
+
+    // Background work (server backup)
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("androidx.hilt:hilt-work:1.2.0")
+    ksp("androidx.hilt:hilt-compiler:1.2.0")
+
+    // SFTP client (maintained JSch fork)
+    implementation("com.github.mwiede:jsch:0.2.20")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

@@ -265,6 +265,11 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // === Server (SFTP) ===
+            ServerSettingsSection()
+
+            Spacer(modifier = Modifier.height(24.dp))
+
             // === Debug ===
             Text("Debug", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))

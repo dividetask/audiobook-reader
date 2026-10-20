@@ -71,6 +71,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
 import com.dividetask.audiobookreader.audible.download.DownloadProgress
 import com.dividetask.audiobookreader.ui.common.PauseIcon
+import com.dividetask.audiobookreader.ui.remote.ServerLibraryTab
 import com.dividetask.audiobookreader.audible.download.DownloadState
 import com.dividetask.audiobookreader.player.PlaybackState as PState
 import com.dividetask.audiobookreader.data.db.entity.AudibleBookEntity
@@ -111,7 +112,7 @@ fun MainScreen(
     }
 
     LaunchedEffect(selectedTab) {
-        if (selectedTab == 1 || selectedTab == 2) {
+        if (selectedTab == 1 || selectedTab == 3) {
             viewModel.syncAudibleLibrary()
         }
     }
@@ -133,6 +134,8 @@ fun MainScreen(
                     Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 },
                         text = { Text("Audible") })
                     Tab(selected = selectedTab == 2, onClick = { selectedTab = 2 },
+                        text = { Text("Server") })
+                    Tab(selected = selectedTab == 3, onClick = { selectedTab = 3 },
                         text = { Text("All") })
                 }
             }
@@ -163,7 +166,7 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            if (isSyncing && (selectedTab == 1 || selectedTab == 2)) {
+            if (isSyncing && (selectedTab == 1 || selectedTab == 3)) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
 
@@ -197,7 +200,8 @@ fun MainScreen(
                         )
                     }
                 }
-                2 -> {
+                2 -> ServerLibraryTab(onOpenSettings = onSettingsClick)
+                3 -> {
                     AllBooksList(
                         localBooks = localBooks,
                         audibleBooks = if (viewModel.isAudibleAuthenticated) audibleBooks else emptyList(),
