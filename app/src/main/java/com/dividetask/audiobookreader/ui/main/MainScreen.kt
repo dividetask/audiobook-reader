@@ -91,6 +91,7 @@ fun MainScreen(
     val audibleBooks by viewModel.audibleBooks.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
     val importError by viewModel.importError.collectAsState()
+    val aaxImport by viewModel.aaxImportStatus.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
     val queuedAsins by viewModel.queuedAsins.collectAsState()
     val convertingBookId by viewModel.convertingBookId.collectAsState()
@@ -109,6 +110,14 @@ fun MainScreen(
         importError?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearError()
+        }
+    }
+
+    LaunchedEffect(aaxImport) {
+        val status = aaxImport
+        if (status?.finished == true) {
+            snackbarHostState.showSnackbar(status.step)
+            viewModel.clearAaxImportStatus()
         }
     }
 
@@ -152,7 +161,7 @@ fun MainScreen(
         floatingActionButton = {
             if (selectedTab == 0) {
                 FloatingActionButton(onClick = {
-                    filePickerLauncher.launch(arrayOf("audio/*", "application/octet-stream"))
+                    filePickerLauncher.launch(arrayOf("audio/*", "application/octet-stream", "audio/vnd.audible.aax", "audio/aax"))
                 }) {
                     Icon(Icons.Default.Add, contentDescription = "Add Book")
                 }
@@ -177,6 +186,18 @@ fun MainScreen(
         ) {
             if (isSyncing && (selectedTab == 1 || selectedTab == 3)) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+
+            aaxImport?.takeIf { !it.finished }?.let { status ->
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Text(
+                        "Importing ${status.title} — ${status.step}…",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                }
             }
 
             val tabContent: @Composable () -> Unit = {

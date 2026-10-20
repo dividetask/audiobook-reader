@@ -40,6 +40,7 @@ class MainViewModel @Inject constructor(
     private val metadataExtractor: MetadataExtractor,
     private val converter: com.dividetask.audiobookreader.audible.download.AaxConverter,
     private val activationBytesProvider: com.dividetask.audiobookreader.audible.auth.ActivationBytesProvider,
+    private val aaxImporter: com.dividetask.audiobookreader.audible.download.AaxImporter,
     val playbackController: com.dividetask.audiobookreader.player.PlaybackController,
     private val debugLog: AppDebugLog,
     @ApplicationContext private val context: Context
@@ -104,9 +105,19 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    val aaxImportStatus = aaxImporter.status
+
+    fun clearAaxImportStatus() = aaxImporter.clearStatus()
+
     fun importLocalBook(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                val name = displayName(uri)
+                if (name.endsWith(".aax", ignoreCase = true)) {
+                    // Copied into the app, converted, and matched to the Audible library
+                    aaxImporter.import(uri, name)
+                    return@launch
+                }
                 context.contentResolver.takePersistableUriPermission(
                     uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
@@ -123,6 +134,12 @@ class MainViewModel @Inject constructor(
                 _importError.value = "Failed to import: ${e.message}"
             }
         }
+    }
+
+    private fun displayName(uri: Uri): String {
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0)?.let { return it } }
+        return uri.lastPathSegment ?: ""
     }
 
     fun deleteLocalBook(bookId: Long) {

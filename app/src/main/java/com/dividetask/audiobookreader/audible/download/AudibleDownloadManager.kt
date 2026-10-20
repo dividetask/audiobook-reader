@@ -99,10 +99,10 @@ class AudibleDownloadManager @Inject constructor(
             bookRepository.getAllBooks().collect { books ->
                 completedAsins.clear()
                 books.forEach { book ->
+                    // Any file in audiobooks/ named {asin}.{ext} — converted books are .m4b/.m4a, not .aax
                     val uri = book.fileUri
-                    if (uri.contains("/audiobooks/") && uri.endsWith(".aax")) {
-                        val asin = uri.substringAfterLast("/").substringBefore(".aax")
-                        completedAsins.add(asin)
+                    if (uri.contains("/audiobooks/")) {
+                        completedAsins.add(uri.substringAfterLast("/").substringBeforeLast("."))
                     }
                 }
             }
