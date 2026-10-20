@@ -4,9 +4,11 @@ import android.util.Base64
 import android.util.Log
 import com.dividetask.audiobookreader.audible.auth.AudibleAuthManager
 import com.dividetask.audiobookreader.audible.auth.AudibleEndpoints
+import com.dividetask.audiobookreader.audible.auth.AudibleRequestSigner
 import com.dividetask.audiobookreader.debug.AppDebugLog
 import com.dividetask.audiobookreader.audible.auth.AudibleTokenStore
 import io.ktor.client.HttpClient
+import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.parameter
@@ -43,9 +45,37 @@ class AudibleApiClient @Inject constructor(
     private val httpClient: HttpClient,
     private val tokenStore: AudibleTokenStore,
     private val authManager: AudibleAuthManager,
+    private val signer: AudibleRequestSigner,
     private val debugLog: AppDebugLog
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+
+    private val canSign: Boolean
+        get() = !tokenStore.adpToken.isNullOrBlank() && !tokenStore.devicePrivateKey.isNullOrBlank()
+
+    /**
+     * Signs the request with the registered device's ADP token and private key, as
+     * the Audible apps and audible-cli do. Bearer-only requests appear to be treated
+     * as a generic Login-with-Amazon client ("[AAA] does not has access to asin").
+     * Falls back to the bearer token when signing isn't possible. Call after all
+     * query parameters are set, since the signature covers the path and query.
+     * Retries after a 401/403 pass sign = false, so a bad signature can't lock us out.
+     */
+    private fun HttpRequestBuilder.authorize(method: String, accessToken: String, body: String = "", sign: Boolean = true) {
+        if (!sign) {
+            header("x-amz-access-token", accessToken)
+            return
+        }
+        val built = url.build()
+        val pathAndQuery = built.encodedPath +
+            if (built.encodedQuery.isNotEmpty()) "?${built.encodedQuery}" else ""
+        val signed = signer.signRequest(method, pathAndQuery, body)
+        if (signed.isNotEmpty()) {
+            signed.forEach { (k, v) -> header(k, v) }
+        } else {
+            header("x-amz-access-token", accessToken)
+        }
+    }
 
     /**
      * Set when Audible answers a license request with CustomerThrottled. License
@@ -99,8 +129,8 @@ class AudibleApiClient @Inject constructor(
 
         try {
             var response = httpClient.get(url) {
-                header("x-amz-access-token", accessToken)
                 params.forEach { (k, v) -> parameter(k, v) }
+                authorize("GET", accessToken)
             }
 
             log.add("Response status: ${response.status}")
@@ -115,8 +145,8 @@ class AudibleApiClient @Inject constructor(
                     val newToken = tokenStore.accessToken ?: ""
                     log.add("New token prefix: ${newToken.take(20)}...")
                     response = httpClient.get(url) {
-                        header("x-amz-access-token", newToken)
                         params.forEach { (k, v) -> parameter(k, v) }
+                        authorize("GET", newToken, sign = false)
                     }
                     log.add("Retry response status: ${response.status}")
                 } else {
@@ -173,9 +203,10 @@ class AudibleApiClient @Inject constructor(
                 put("quality", tokenStore.downloadQuality)
             }
             log.add("Request body: ${body}")
+            log.add("Auth: ${if (canSign) "ADP-signed" else "bearer token only (no ADP token / device key)"}")
 
             val response = httpClient.post(url) {
-                header("x-amz-access-token", accessToken)
+                authorize("POST", accessToken, body.toString())
                 contentType(ContentType.Application.Json)
                 setBody(body.toString())
             }
@@ -193,7 +224,7 @@ class AudibleApiClient @Inject constructor(
                     log.add("Refresh: ${if (refreshed) "ok" else "failed"}")
                     if (refreshed) {
                         val retryResponse = httpClient.post(url) {
-                            header("x-amz-access-token", tokenStore.accessToken!!)
+                            authorize("POST", tokenStore.accessToken!!, body.toString(), sign = false)
                             contentType(ContentType.Application.Json)
                             setBody(body.toString())
                         }
@@ -242,15 +273,15 @@ class AudibleApiClient @Inject constructor(
 
         return try {
             var response = httpClient.get(url) {
-                header("x-amz-access-token", accessToken)
                 params.forEach { (k, v) -> parameter(k, v) }
+                authorize("GET", accessToken)
             }
             if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
                 log.add("Got ${response.status}, refreshing token")
                 if (!authManager.refreshAccessToken()) return ApiResult(null, log)
                 response = httpClient.get(url) {
-                    header("x-amz-access-token", tokenStore.accessToken ?: "")
                     params.forEach { (k, v) -> parameter(k, v) }
+                    authorize("GET", tokenStore.accessToken ?: "", sign = false)
                 }
             }
             val responseText = response.bodyAsText()
