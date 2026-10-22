@@ -101,6 +101,39 @@ class AaxConverter @Inject constructor(
         return null
     }
 
+    /**
+     * Converts an unencrypted audio file (e.g. a YouTube download) to [outFile] (.m4b).
+     * AAC input is stream-copied; anything else (Opus, Vorbis) is re-encoded to AAC.
+     */
+    fun convertToM4b(input: File, outFile: File, durationMs: Long?, onProgress: ((Float) -> Unit)? = null): Boolean {
+        debugLog.section("Convert: ${input.name}")
+        debugLog.log("CONV", "Input: ${input.absolutePath} (${input.length() / 1_048_576}MB)")
+        val options = listOf(
+            "Stream copy" to "-c:a copy",
+            "AAC" to "-c:a aac -b:a 96k -strict -2",
+            "AAC (resample)" to "-c:a aac -b:a 96k -ar 44100 -ac 2 -strict -2"
+        ).let { if (input.extension.equals("m4a", ignoreCase = true)) it else it.drop(1) }
+
+        for ((name, args) in options) {
+            val cmd = "-y -i \"${input.absolutePath}\" -map 0:a -vn $args -f mp4 \"${outFile.absolutePath}\""
+            debugLog.log("CONV", "Trying $name...")
+            try {
+                onProgress?.invoke(0f)
+                val session = run(cmd, durationMs, onProgress)
+                if (ReturnCode.isSuccess(session.returnCode) && outFile.exists() && outFile.length() > 1000) {
+                    debugLog.log("CONV", "Success with $name: ${outFile.length() / 1_048_576}MB")
+                    return true
+                }
+                val output = session.allLogsAsString ?: "no output"
+                debugLog.log("CONV", "$name failed: ${output.lines().takeLast(3).joinToString(" | ")}")
+            } catch (e: Exception) {
+                debugLog.log("CONV", "$name exception: ${e.message}")
+            }
+            outFile.delete()
+        }
+        return false
+    }
+
     fun convertWithKeyIv(aaxFile: File, key: String, iv: String, onProgress: ((Float) -> Unit)? = null): File? {
         val m4bFile = File(aaxFile.parent, aaxFile.nameWithoutExtension + ".m4b")
 

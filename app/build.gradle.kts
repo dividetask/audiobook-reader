@@ -26,7 +26,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = (System.currentTimeMillis() / 60000).toInt()
-        versionName = "v0.111 a" + if (gitCommit.isNotEmpty()) " ($gitCommit)" else ""
+        versionName = "v0.113 a" + if (gitCommit.isNotEmpty()) " ($gitCommit)" else ""
 
         buildConfigField("long", "BUILD_TIMESTAMP", "${System.currentTimeMillis()}L")
     }
@@ -75,6 +75,8 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
         resources.excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        // youtubedl-android runs its bundled Python from the extracted native libs
+        jniLibs.useLegacyPackaging = true
     }
 }
 
@@ -119,6 +121,9 @@ dependencies {
 
     // FFmpeg for AAX to M4B conversion (community-maintained fork)
     implementation("dev.ffmpegkit-maintained:ffmpeg:8.1.7")
+
+    // yt-dlp for adding books from YouTube links
+    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
 
     // Encrypted SharedPreferences for token storage
     implementation("androidx.security:security-crypto:1.1.0-alpha06")

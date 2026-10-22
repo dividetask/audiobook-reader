@@ -43,6 +43,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -66,6 +67,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -92,6 +94,11 @@ fun MainScreen(
     val isSyncing by viewModel.isSyncing.collectAsState()
     val importError by viewModel.importError.collectAsState()
     val aaxImport by viewModel.aaxImportStatus.collectAsState()
+    val youtubeImport by viewModel.youtubeImportStatus.collectAsState()
+    val importStatus = aaxImport?.takeIf { !it.finished } ?: youtubeImport?.takeIf { !it.finished }
+    var showAddMenu by remember { mutableStateOf(false) }
+    var youtubeUrl by remember { mutableStateOf<String?>(null) }
+    val clipboard = LocalClipboardManager.current
     val downloadProgress by viewModel.downloadProgress.collectAsState()
     val queuedAsins by viewModel.queuedAsins.collectAsState()
     val convertingBookId by viewModel.convertingBookId.collectAsState()
@@ -118,6 +125,14 @@ fun MainScreen(
         if (status?.finished == true) {
             snackbarHostState.showSnackbar(status.step)
             viewModel.clearAaxImportStatus()
+        }
+    }
+
+    LaunchedEffect(youtubeImport) {
+        val status = youtubeImport
+        if (status?.finished == true) {
+            snackbarHostState.showSnackbar(status.step)
+            viewModel.clearYoutubeImportStatus()
         }
     }
 
@@ -160,10 +175,28 @@ fun MainScreen(
         },
         floatingActionButton = {
             if (selectedTab == 0) {
-                FloatingActionButton(onClick = {
-                    filePickerLauncher.launch(arrayOf("audio/*", "application/octet-stream", "audio/vnd.audible.aax", "audio/aax"))
-                }) {
-                    Icon(Icons.Default.Add, contentDescription = "Add Book")
+                Box {
+                    FloatingActionButton(onClick = { showAddMenu = true }) {
+                        Icon(Icons.Default.Add, contentDescription = "Add Book")
+                    }
+                    DropdownMenu(expanded = showAddMenu, onDismissRequest = { showAddMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Import file") },
+                            onClick = {
+                                showAddMenu = false
+                                filePickerLauncher.launch(arrayOf("audio/*", "application/octet-stream", "audio/vnd.audible.aax", "audio/aax"))
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("YouTube link") },
+                            onClick = {
+                                showAddMenu = false
+                                // Pre-fill with a copied YouTube link
+                                val copied = clipboard.getText()?.text?.trim().orEmpty()
+                                youtubeUrl = copied.takeIf { "youtu" in it } ?: ""
+                            }
+                        )
+                    }
                 }
             }
         },
@@ -188,7 +221,7 @@ fun MainScreen(
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
 
-            aaxImport?.takeIf { !it.finished }?.let { status ->
+            importStatus?.let { status ->
                 Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                     val percent = status.progress?.let { " ${(it * 100).toInt()}%" } ?: "…"
                     Text(
@@ -270,6 +303,34 @@ fun MainScreen(
                 tabContent()
             }
         }
+    }
+
+    youtubeUrl?.let { url ->
+        AlertDialog(
+            onDismissRequest = { youtubeUrl = null },
+            title = { Text("Add from YouTube") },
+            text = {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { youtubeUrl = it },
+                    label = { Text("Video link") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.importYoutube(url)
+                        youtubeUrl = null
+                    },
+                    enabled = url.isNotBlank()
+                ) { Text("Add") }
+            },
+            dismissButton = {
+                TextButton(onClick = { youtubeUrl = null }) { Text("Cancel") }
+            }
+        )
     }
 
     bookToDelete?.let { book ->

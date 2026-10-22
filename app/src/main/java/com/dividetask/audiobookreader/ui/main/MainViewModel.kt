@@ -41,6 +41,7 @@ class MainViewModel @Inject constructor(
     private val converter: com.dividetask.audiobookreader.audible.download.AaxConverter,
     private val activationBytesProvider: com.dividetask.audiobookreader.audible.auth.ActivationBytesProvider,
     private val aaxImporter: com.dividetask.audiobookreader.audible.download.AaxImporter,
+    private val youtubeImporter: com.dividetask.audiobookreader.youtube.YoutubeImporter,
     val playbackController: com.dividetask.audiobookreader.player.PlaybackController,
     private val debugLog: AppDebugLog,
     @ApplicationContext private val context: Context
@@ -108,6 +109,12 @@ class MainViewModel @Inject constructor(
     val aaxImportStatus = aaxImporter.status
 
     fun clearAaxImportStatus() = aaxImporter.clearStatus()
+
+    val youtubeImportStatus = youtubeImporter.status
+
+    fun clearYoutubeImportStatus() = youtubeImporter.clearStatus()
+
+    fun importYoutube(url: String) = youtubeImporter.import(url)
 
     fun importLocalBook(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
