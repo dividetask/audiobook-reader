@@ -112,6 +112,8 @@ class YoutubeImporter @Inject constructor(
             val infoRequest = YoutubeDLRequest(url).apply {
                 addOption("--dump-single-json")
                 addOption("--no-playlist")
+                // Logs each request, so failures show which host and client broke
+                addOption("--verbose")
             }
             val infoResponse = ytdl.execute(infoRequest)
             val info = JSONObject(infoResponse.out.substring(infoResponse.out.indexOf('{')))
@@ -181,6 +183,8 @@ class YoutubeImporter @Inject constructor(
             debugLog.log("YT", "Added to library: ${dest.name}")
             _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
         } catch (e: Exception) {
+            // yt-dlp's whole output (warnings before the final error) is in the message
+            e.message?.lines()?.filter { it.isNotBlank() }?.forEach { debugLog.log("YT", it) }
             fail("${e::class.simpleName}: ${e.message?.lines()?.lastOrNull { it.isNotBlank() }}")
         }
     }
