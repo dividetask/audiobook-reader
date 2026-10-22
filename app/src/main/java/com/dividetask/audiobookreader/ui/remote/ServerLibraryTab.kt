@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import com.dividetask.audiobookreader.remote.RemoteDownload
+import com.dividetask.audiobookreader.ui.common.matchesSearch
 import com.dividetask.audiobookreader.remote.RemoteFile
 import com.dividetask.audiobookreader.remote.RemoteLibraryManager
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -52,10 +53,12 @@ class ServerLibraryViewModel @Inject constructor(
 @Composable
 fun ServerLibraryTab(
     onOpenSettings: () -> Unit,
+    searchQuery: String = "",
     viewModel: ServerLibraryViewModel = hiltViewModel()
 ) {
     val manager = viewModel.manager
-    val files by manager.files.collectAsState()
+    val allFiles by manager.files.collectAsState()
+    val files = allFiles.filter { matchesSearch(searchQuery, it.title, it.folder) }
     val isLoading by manager.isLoading.collectAsState()
     val error by manager.error.collectAsState()
     val downloads by manager.downloads.collectAsState()
@@ -80,7 +83,7 @@ fun ServerLibraryTab(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                if (isLoading && files.isEmpty()) "Connecting..." else "${files.size} books on server",
+                if (isLoading && files.isEmpty()) "Connecting..." else if (files.size == allFiles.size) "${files.size} books on server" else "${files.size} of ${allFiles.size} books on server",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f)

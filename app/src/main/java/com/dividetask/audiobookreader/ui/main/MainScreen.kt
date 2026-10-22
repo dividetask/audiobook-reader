@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -74,6 +75,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
 import com.dividetask.audiobookreader.audible.download.DownloadProgress
 import com.dividetask.audiobookreader.ui.common.PauseIcon
+import com.dividetask.audiobookreader.ui.common.matchesSearch
 import com.dividetask.audiobookreader.ui.remote.ServerLibraryTab
 import com.dividetask.audiobookreader.audible.download.DownloadState
 import com.dividetask.audiobookreader.player.PlaybackState as PState
@@ -89,8 +91,14 @@ fun MainScreen(
     viewModel: MainViewModel = hiltViewModel()
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    val localBooks by viewModel.localBooks.collectAsState()
-    val audibleBooks by viewModel.audibleBooks.collectAsState()
+    val allLocalBooks by viewModel.localBooks.collectAsState()
+    val allAudibleBooks by viewModel.audibleBooks.collectAsState()
+    var showSearch by rememberSaveable { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    val localBooks = allLocalBooks.filter { matchesSearch(searchQuery, it.title, it.author) }
+    val audibleBooks = allAudibleBooks.filter {
+        matchesSearch(searchQuery, it.title, it.author, it.narrator, it.seriesTitle)
+    }
     val isSyncing by viewModel.isSyncing.collectAsState()
     val importError by viewModel.importError.collectAsState()
     val aaxImport by viewModel.aaxImportStatus.collectAsState()
@@ -156,6 +164,12 @@ fun MainScreen(
                 TopAppBar(
                     title = { Text("Audiobook Reader") },
                     actions = {
+                        IconButton(onClick = {
+                            showSearch = !showSearch
+                            if (!showSearch) searchQuery = ""
+                        }) {
+                            Icon(Icons.Default.Search, contentDescription = "Search")
+                        }
                         IconButton(onClick = onSettingsClick) {
                             Icon(Icons.Default.Settings, contentDescription = "Settings")
                         }
@@ -170,6 +184,24 @@ fun MainScreen(
                         text = { Text("Server") })
                     Tab(selected = selectedTab == 3, onClick = { selectedTab = 3 },
                         text = { Text("All") })
+                }
+                // One search box filters whichever tab is showing
+                if (showSearch) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        placeholder = { Text("Search title, author, narrator, series") },
+                        singleLine = true,
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Clear search")
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
                 }
             }
         },
@@ -273,7 +305,7 @@ fun MainScreen(
                             )
                         }
                     }
-                    2 -> ServerLibraryTab(onOpenSettings = onSettingsClick)
+                    2 -> ServerLibraryTab(onOpenSettings = onSettingsClick, searchQuery = searchQuery)
                     3 -> {
                         AllBooksList(
                             localBooks = localBooks,
@@ -294,7 +326,7 @@ fun MainScreen(
             if (selectedTab == 1 || selectedTab == 3) {
                 PullToRefreshBox(
                     isRefreshing = isSyncing,
-                    onRefresh = { viewModel.syncAudibleLibrary() },
+                    onRefresh = { viewModel.syncAudibleLibrary(force = true) },
                     modifier = Modifier.fillMaxSize()
                 ) {
                     tabContent()
@@ -337,7 +369,9 @@ fun MainScreen(
         AlertDialog(
             onDismissRequest = { bookToDelete = null },
             title = { Text("Remove Book") },
-            text = { Text("Remove \"${book.title}\" from your library?") },
+            text = {
+                Text("Remove \"${book.title}\" from your library? Files the app downloaded or imported are deleted; files you added from your phone are kept.")
+            },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.deleteLocalBook(book.id)

@@ -77,10 +77,11 @@ class MainViewModel @Inject constructor(
     private var lastSyncTime = 0L
     private val syncCooldownMs = 300_000L // 5 minutes
 
-    fun syncAudibleLibrary() {
+    /** Opening a tab syncs at most every 5 minutes; [force] (pull to refresh) always fetches. */
+    fun syncAudibleLibrary(force: Boolean = false) {
         if (!tokenStore.isAuthenticated || _isSyncing.value) return
         val now = System.currentTimeMillis()
-        if (now - lastSyncTime < syncCooldownMs) return
+        if (!force && now - lastSyncTime < syncCooldownMs) return
         lastSyncTime = now
 
         viewModelScope.launch {
@@ -149,8 +150,34 @@ class MainViewModel @Inject constructor(
         return uri.lastPathSegment ?: ""
     }
 
+    /**
+     * Removes the book and deletes its file if the app made it (Audible downloads,
+     * imports, YouTube). Files picked from the phone's own storage are left alone.
+     */
     fun deleteLocalBook(bookId: Long) {
-        viewModelScope.launch { bookRepository.deleteBook(bookId) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val book = bookRepository.getBookById(bookId)
+            bookRepository.deleteBook(bookId)
+            book ?: return@launch
+            val uri = Uri.parse(book.fileUri)
+            val appDir = context.getExternalFilesDir(null)?.canonicalPath
+            val path = uri.path
+            if (uri.scheme == "file" && path != null && appDir != null) {
+                val file = java.io.File(path).canonicalFile
+                if (file.path.startsWith(appDir + java.io.File.separator)) {
+                    // An Audible book may also still have its .aax next to the converted file
+                    listOf(file, java.io.File(file.parentFile, "${file.nameWithoutExtension}.aax"))
+                        .filter { it.exists() && it.delete() }
+                        .forEach { debugLog.log("LIB", "Deleted file: ${it.name}") }
+                }
+            } else if (uri.scheme == "content") {
+                try {
+                    context.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (e: SecurityException) {
+                    // Permission was never persisted
+                }
+            }
+        }
     }
 
     fun downloadAudibleBook(audibleBook: AudibleBookEntity) {
