@@ -95,6 +95,15 @@ Rules:
   `Fix playback error handling (v0.037 b)`.
 - Enable `buildConfig = true` so the app can show `BuildConfig.VERSION_NAME`.
 
+## Merging branches
+
+- Only take APKs from `main`. When merging any other branch, ignore all of
+  its APKs (`versions/*.apk`, including `latest.apk`): keep this branch's
+  copies on conflict, and don't add APKs that exist only on the other branch.
+  For example, after `git merge --no-commit <branch>`, run
+  `git checkout HEAD -- versions/` and `git rm -f` any APK the merge
+  added, before committing.
+
 ## After pushing — read the build result
 
 There is no Android SDK in the agent's environment, so the build automation
