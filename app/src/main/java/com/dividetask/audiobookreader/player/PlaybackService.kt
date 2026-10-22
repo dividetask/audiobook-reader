@@ -1,6 +1,7 @@
 package com.dividetask.audiobookreader.player
 
 import android.app.PendingIntent
+import android.database.sqlite.SQLiteConstraintException
 import android.content.Intent
 import android.os.Bundle
 import androidx.annotation.OptIn
@@ -31,6 +32,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -141,6 +143,13 @@ class PlaybackService : MediaSessionService() {
             playingBookId
                 .flatMapLatest { id -> if (id < 0) flowOf(emptyList()) else bookRepository.getChapters(id) }
                 .collect { sessionPlayer.chapters = it }
+        }
+        // Deleting the playing book: stop, and drop the listening span so nothing is
+        // written for a book that's gone (history rows must point at an existing book)
+        serviceScope.launch {
+            combine(playingBookId, bookRepository.getAllBooks()) { id, books -> id >= 0 && books.none { it.id == id } }
+                .distinctUntilChanged()
+                .collect { deleted -> if (deleted) stopDeletedBook() }
         }
         // The session doesn't notice chapter boundaries during normal playback
         serviceScope.launch {
@@ -253,6 +262,15 @@ class PlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 
+    private fun stopDeletedBook() {
+        activeSession = null
+        stopPeriodicPositionSave()
+        exoPlayer?.run {
+            clearMediaItems()
+            stop()
+        }
+    }
+
     private fun startPeriodicPositionSave() {
         positionSaveJob?.cancel()
         positionSaveJob = serviceScope.launch {
@@ -302,18 +320,22 @@ class PlaybackService : MediaSessionService() {
         if (session.rowId < 0 && now - session.startedAt < MIN_SESSION_MS) return
         persistScope.launch {
             sessionMutex.withLock {
-                if (session.rowId < 0) {
-                    session.rowId = historyRepository.insertSession(
-                        ListenSessionEntity(
-                            bookId = session.bookId,
-                            startedAt = session.startedAt,
-                            endedAt = now,
-                            startPositionMs = session.startPositionMs,
-                            endPositionMs = endPositionMs
+                try {
+                    if (session.rowId < 0) {
+                        session.rowId = historyRepository.insertSession(
+                            ListenSessionEntity(
+                                bookId = session.bookId,
+                                startedAt = session.startedAt,
+                                endedAt = now,
+                                startPositionMs = session.startPositionMs,
+                                endPositionMs = endPositionMs
+                            )
                         )
-                    )
-                } else {
-                    historyRepository.updateSessionEnd(session.rowId, now, endPositionMs)
+                    } else {
+                        historyRepository.updateSessionEnd(session.rowId, now, endPositionMs)
+                    }
+                } catch (e: SQLiteConstraintException) {
+                    // The book was deleted since the span started
                 }
             }
         }
