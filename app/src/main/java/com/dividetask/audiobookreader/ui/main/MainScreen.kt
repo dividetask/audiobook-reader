@@ -103,6 +103,7 @@ fun MainScreen(
     val importError by viewModel.importError.collectAsState()
     val aaxImport by viewModel.aaxImportStatus.collectAsState()
     val youtubeImport by viewModel.youtubeImportStatus.collectAsState()
+    val shortVideoWarning by viewModel.youtubeShortVideoWarning.collectAsState()
     val importStatus = aaxImport?.takeIf { !it.finished } ?: youtubeImport?.takeIf { !it.finished }
     var showAddMenu by remember { mutableStateOf(false) }
     var youtubeUrl by remember { mutableStateOf<String?>(null) }
@@ -335,6 +336,20 @@ fun MainScreen(
                 tabContent()
             }
         }
+    }
+
+    shortVideoWarning?.let { message ->
+        AlertDialog(
+            onDismissRequest = { viewModel.answerYoutubeShortVideoWarning(false) },
+            title = { Text("Short video") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { viewModel.answerYoutubeShortVideoWarning(true) }) { Text("Import anyway") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.answerYoutubeShortVideoWarning(false) }) { Text("Cancel") }
+            }
+        )
     }
 
     youtubeUrl?.let { url ->

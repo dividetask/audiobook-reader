@@ -12,6 +12,7 @@ import com.dividetask.audiobookreader.debug.AppDebugLog
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -62,6 +63,15 @@ class YoutubeImporter @Inject constructor(
 
     fun import(url: String) {
         scope.launch { mutex.withLock { runImport(url.trim()) } }
+    }
+
+    /** Set while an import waits for the user to confirm a suspiciously short video. */
+    private val _shortVideoWarning = MutableStateFlow<String?>(null)
+    val shortVideoWarning: StateFlow<String?> = _shortVideoWarning.asStateFlow()
+    private var warningAnswer: CompletableDeferred<Boolean>? = null
+
+    fun answerShortVideoWarning(proceed: Boolean) {
+        warningAnswer?.complete(proceed)
     }
 
     fun clearStatus() {
@@ -135,6 +145,27 @@ class YoutubeImporter @Inject constructor(
             val match = findOnAudible(guess.title, guess.author ?: described.author, videoTitle, durationMs)
             debugLog.log("YT", "Audible match: ${match?.let { "${it.title} by ${it.author} (${it.asin}, ${it.runtimeMinutes} min)" } ?: "none"}")
             title = match?.title ?: guess.title
+
+            // Uploads titled "Full Audiobook" are sometimes just a few-minute preview
+            val runtime = match?.runtimeMinutes
+            if (runtime != null && durationMs > 0 && durationMs < runtime * 60_000L / 2) {
+                step("Waiting for confirmation")
+                val answer = CompletableDeferred<Boolean>()
+                warningAnswer = answer
+                _shortVideoWarning.value = "This video is ${durationMs / 60_000} min long, but the " +
+                    "Audible edition of \"$title\" is $runtime min. It's probably a preview, not the full book."
+                val proceed = try {
+                    answer.await()
+                } finally {
+                    _shortVideoWarning.value = null
+                    warningAnswer = null
+                }
+                debugLog.log("YT", "Short video (${durationMs / 60_000} of $runtime min): ${if (proceed) "importing anyway" else "cancelled"}")
+                if (!proceed) {
+                    _status.value = AaxImportStatus(title, "Import cancelled", finished = true)
+                    return
+                }
+            }
 
             step("Downloading")
             downloadDir.listFiles()?.forEach { it.delete() }

@@ -117,6 +117,10 @@ class MainViewModel @Inject constructor(
 
     fun importYoutube(url: String) = youtubeImporter.import(url)
 
+    val youtubeShortVideoWarning = youtubeImporter.shortVideoWarning
+
+    fun answerYoutubeShortVideoWarning(proceed: Boolean) = youtubeImporter.answerShortVideoWarning(proceed)
+
     fun importLocalBook(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
