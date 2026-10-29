@@ -6,45 +6,46 @@ This document describes all playback controls accessible **without unlocking the
 
 When an audiobook is playing, the user must be able to control playback without unlocking their phone. This is critical for hands-free use cases such as driving, exercising, or falling asleep.
 
-**Target platforms:** [e.g., Android, iOS, both]
+**Target platforms:** Android (tested target: Android 17). Implemented in v0.109 a.
 
 ---
 
 ## Lock Screen Media Controls
 
-The lock screen displays a media control widget when playback is active or paused.
+On Android 13+ the lock screen and notification share the system media controls,
+built from the app's MediaSession (`player/PlaybackService.kt`).
 
 ### Displayed Information
 
 | Element | Description |
 |---------|-------------|
-| Cover Art | [e.g., Book cover image, or app icon as fallback] |
-| Title | [e.g., Book title] |
-| Subtitle | [e.g., Author name, or chapter title — specify which] |
-| Progress Bar | [e.g., Seekable progress bar showing position within current chapter / entire book] |
-| Elapsed Time | [e.g., Time elapsed in current chapter / entire book] |
-| Remaining Time | [e.g., Time remaining in current chapter / entire book] |
-| [Other element] | [Description] |
+| Cover Art | Book cover |
+| Title | Book title |
+| Subtitle | Author |
+| Progress Bar | Position within the **current chapter** (whole book if the book has no chapters). Not draggable. |
+| Elapsed / Remaining | Within the current chapter (drawn by the system) |
 
 ### Available Controls
 
 | Control | Behavior | Icon/Label |
 |---------|----------|------------|
-| Play / Pause | [e.g., Toggles playback. Shows pause icon when playing, play icon when paused] | [Play/Pause icon] |
-| Skip Forward | [e.g., Jumps forward by user-configured interval (default: 30s)] | [e.g., +30s icon] |
-| Skip Backward | [e.g., Jumps backward by user-configured interval (default: 15s)] | [e.g., -15s icon] |
-| Next Chapter | [e.g., Skips to beginning of next chapter. Shown as: ___] | [e.g., Next track icon] |
-| Previous Chapter | [e.g., If >3s into chapter, restarts chapter. If <3s, goes to previous chapter] | [e.g., Previous track icon] |
-| Seek Bar Drag | [e.g., User can drag the progress bar to scrub to a position. Available: Yes/No] | [Progress bar] |
-| [Other control] | [Behavior] | [Icon] |
+| Play / Pause | Toggles playback | System play/pause |
+| Skip Backward | Jumps back by the configured skip-back seconds (Settings → Playback, default 15s). Recorded in the Jumps history as "Lock screen skip back". | Counter-clockwise arrow, label "Back Ns" |
+| Skip Forward | Jumps forward by the configured skip-forward seconds (default 30s). Recorded as "Lock screen skip forward". | Clockwise arrow, label "Forward Ns" |
 
 ### Controls NOT Available on Lock Screen
 
-- [e.g., Bookmark creation — requires unlock]
-- [e.g., Speed change — requires unlock]
-- [e.g., Sleep timer adjustment — requires unlock]
-- [e.g., Chapter list navigation — requires unlock]
-- [List all controls that are intentionally NOT on lock screen]
+- Previous / next chapter (deliberately removed)
+- Dragging the progress bar to seek
+- Speed, chapter list, history — require unlocking
+
+### How chapter progress works
+
+The session is given `ChapterProgressPlayer`, a wrapper that reports position and
+duration relative to the current chapter. The app reads the real player through
+`PlayerHolder`, so in-app positions stay absolute. System controllers (notification,
+lock screen, Bluetooth) are given play/pause and the two skip commands only — no
+seek or previous/next commands.
 
 ---
 
@@ -104,7 +105,8 @@ Controls available via Bluetooth headsets, earbuds, or wired headphones.
 
 | Event | Behavior |
 |-------|----------|
-| Single press (play/pause button) | [e.g., Toggle play/pause] |
+| Single press (play/pause button) | Toggle play/pause |
+| Next / previous track buttons | Do nothing |
 | Double press | [e.g., Skip forward by configured interval] |
 | Triple press | [e.g., Skip backward by configured interval] |
 | Long press | [e.g., Trigger voice assistant / do nothing / configurable] |

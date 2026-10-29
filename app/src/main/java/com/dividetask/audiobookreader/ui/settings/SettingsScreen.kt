@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -45,8 +46,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.dividetask.audiobookreader.player.PlaybackPreferences
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -184,6 +187,63 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // === Playback ===
+            Text("Playback", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            val skipBack by viewModel.skipBackSeconds.collectAsState()
+            val skipForward by viewModel.skipForwardSeconds.collectAsState()
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    SecondsField(
+                        label = "Skip back",
+                        seconds = skipBack,
+                        onChange = viewModel::setSkipBackSeconds,
+                        modifier = Modifier.weight(1f)
+                    )
+                    SecondsField(
+                        label = "Skip forward",
+                        seconds = skipForward,
+                        onChange = viewModel::setSkipForwardSeconds,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // === Book info services ===
+            Text("Book Info Services", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Hardcover (reviews)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "hardcover.app → Settings → Hardcover API → copy the token. It expires after a year.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    KeyField("API token", viewModel.hardcoverToken) { viewModel.hardcoverToken = it }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Spotify (store availability)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "developer.spotify.com → Dashboard → Create app → copy the Client ID and Client secret.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    KeyField("Client ID", viewModel.spotifyClientId) { viewModel.spotifyClientId = it }
+                    KeyField("Client secret", viewModel.spotifyClientSecret) { viewModel.spotifyClientSecret = it }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
             // === Download Settings ===
             Text("Download Settings", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
@@ -230,6 +290,11 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // === Server (SFTP) ===
+            ServerSettingsSection()
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -302,4 +367,50 @@ fun SettingsScreen(
             }
         )
     }
+}
+
+/** Number field that saves whenever it holds a valid number of seconds. */
+@Composable
+private fun SecondsField(
+    label: String,
+    seconds: Int,
+    onChange: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var text by remember { mutableStateOf(seconds.toString()) }
+    val value = text.toIntOrNull()
+    val valid = value != null && value in PlaybackPreferences.MIN_SKIP..PlaybackPreferences.MAX_SKIP
+
+    OutlinedTextField(
+        value = text,
+        onValueChange = { input ->
+            text = input.filter { it.isDigit() }.take(4)
+            text.toIntOrNull()
+                ?.takeIf { it in PlaybackPreferences.MIN_SKIP..PlaybackPreferences.MAX_SKIP }
+                ?.let(onChange)
+        },
+        label = { Text(label) },
+        suffix = { Text("sec") },
+        isError = !valid,
+        supportingText = if (valid) null else {
+            { Text("${PlaybackPreferences.MIN_SKIP}–${PlaybackPreferences.MAX_SKIP}") }
+        },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = modifier
+    )
+}
+
+/** Single-line secret field; saves on every change. */
+@Composable
+private fun KeyField(label: String, initial: String, onChange: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { text = it; onChange(it) },
+        label = { Text(label) },
+        singleLine = true,
+        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+    )
 }

@@ -8,9 +8,14 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.dividetask.audiobookreader.data.repository.HistoryRepository
 import com.dividetask.audiobookreader.debug.AppDebugLog
 import com.google.common.util.concurrent.MoreExecutors
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,9 +36,20 @@ data class PlaybackState(
 @Singleton
 class PlaybackController @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val debugLog: AppDebugLog
+    private val debugLog: AppDebugLog,
+    private val playbackPreferences: PlaybackPreferences,
+    private val historyRepository: HistoryRepository
 ) {
     private var mediaController: MediaController? = null
+
+    /**
+     * Positions and seeks go to the real player: the session's player reports
+     * chapter-relative values for the lock screen (see ChapterProgressPlayer).
+     * Falls back to the controller until the service has created the player.
+     */
+    private val player: Player?
+        get() = PlayerHolder.player ?: mediaController
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
@@ -124,14 +140,19 @@ class PlaybackController @Inject constructor(
         debugLog.log("PLAY", "MIME type: $mimeType")
 
         val mediaItem = MediaItem.Builder()
+            .setMediaId(bookId.toString())
             .setUri(fileUri)
             .setMediaMetadata(metadata)
             .apply { if (mimeType != null) setMimeType(mimeType) }
             .build()
 
-        controller.setMediaItem(mediaItem)
+        // Pause first so the service closes the previous book's listen session at the right position.
+        if (controller.isPlaying) controller.pause()
+        // Start position goes with the item: a separate seekTo right after setMediaItem
+        // is dropped while the item is still loading (seek command not yet available),
+        // which made books restart from the beginning.
+        controller.setMediaItem(mediaItem, startPositionMs)
         controller.prepare()
-        controller.seekTo(startPositionMs)
         controller.play()
         debugLog.log("PLAY", "Play command sent")
     }
@@ -147,21 +168,29 @@ class PlaybackController @Inject constructor(
         }
     }
 
-    fun seekTo(positionMs: Long) {
-        debugLog.log("USER", "Seek to ${positionMs / 1000}s", com.dividetask.audiobookreader.debug.AppDebugLog.LogLevel.VERBOSE)
-        mediaController?.seekTo(positionMs)
+    /** Seeks and records the jump in the listen history so the user can get back. */
+    fun seekTo(positionMs: Long, reason: String = "Seek") {
+        val player = player ?: return
+        val from = player.currentPosition
+        val duration = player.duration
+        val target = if (duration > 0) positionMs.coerceIn(0, duration) else positionMs.coerceAtLeast(0)
+        debugLog.log("USER", "$reason to ${target / 1000}s", AppDebugLog.LogLevel.VERBOSE)
+        player.seekTo(target)
+        updateState()
+        val bookId = _playbackState.value.bookId
+        scope.launch { historyRepository.recordJump(bookId, from, target, reason) }
     }
 
-    fun skipForward(ms: Long = 30_000) {
-        val controller = mediaController ?: return
-        debugLog.log("USER", "Skip forward ${ms / 1000}s")
-        controller.seekTo(minOf(controller.currentPosition + ms, controller.duration))
+    fun skipForward() {
+        val player = player ?: return
+        val seconds = playbackPreferences.skipForwardSeconds.value
+        seekTo(player.currentPosition + seconds * 1000L, "Skip forward")
     }
 
-    fun skipBackward(ms: Long = 30_000) {
-        val controller = mediaController ?: return
-        debugLog.log("USER", "Skip backward ${ms / 1000}s")
-        controller.seekTo(maxOf(controller.currentPosition - ms, 0))
+    fun skipBackward() {
+        val player = player ?: return
+        val seconds = playbackPreferences.skipBackSeconds.value
+        seekTo(player.currentPosition - seconds * 1000L, "Skip back")
     }
 
     fun setPlaybackSpeed(speed: Float) {
@@ -170,18 +199,19 @@ class PlaybackController @Inject constructor(
     }
 
     fun updateState() {
-        val controller = mediaController ?: return
+        if (mediaController == null) return
+        val player = player ?: return
         _playbackState.value = _playbackState.value.copy(
-            isPlaying = controller.isPlaying,
-            currentPositionMs = controller.currentPosition,
-            durationMs = controller.duration.coerceAtLeast(0),
-            playbackSpeed = controller.playbackParameters.speed,
-            currentMediaItemIndex = controller.currentMediaItemIndex,
-            title = controller.mediaMetadata.title?.toString() ?: "",
-            author = controller.mediaMetadata.artist?.toString() ?: ""
+            isPlaying = player.isPlaying,
+            currentPositionMs = player.currentPosition,
+            durationMs = player.duration.coerceAtLeast(0),
+            playbackSpeed = player.playbackParameters.speed,
+            currentMediaItemIndex = player.currentMediaItemIndex,
+            title = player.mediaMetadata.title?.toString() ?: "",
+            author = player.mediaMetadata.artist?.toString() ?: ""
         )
     }
 
-    fun getCurrentPosition(): Long = mediaController?.currentPosition ?: 0
-    fun getDuration(): Long = mediaController?.duration?.coerceAtLeast(0) ?: 0
+    fun getCurrentPosition(): Long = player?.currentPosition ?: 0
+    fun getDuration(): Long = player?.duration?.coerceAtLeast(0) ?: 0
 }

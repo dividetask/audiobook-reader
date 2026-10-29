@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.dividetask.audiobookreader.audible.auth.AudibleAuthManager
 import com.dividetask.audiobookreader.audible.auth.AudibleEndpoints
 import com.dividetask.audiobookreader.audible.auth.AudibleTokenStore
+import com.dividetask.audiobookreader.player.PlaybackPreferences
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,8 +17,28 @@ import javax.inject.Inject
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val tokenStore: AudibleTokenStore,
-    private val authManager: AudibleAuthManager
+    private val authManager: AudibleAuthManager,
+    private val playbackPreferences: PlaybackPreferences,
+    private val serviceKeys: com.dividetask.audiobookreader.data.details.ServiceKeys
 ) : ViewModel() {
+
+    var hardcoverToken: String
+        get() = serviceKeys.hardcoverToken
+        set(value) { serviceKeys.hardcoverToken = value }
+
+    var spotifyClientId: String
+        get() = serviceKeys.spotifyClientId
+        set(value) { serviceKeys.spotifyClientId = value }
+
+    var spotifyClientSecret: String
+        get() = serviceKeys.spotifyClientSecret
+        set(value) { serviceKeys.spotifyClientSecret = value }
+
+    val skipBackSeconds: StateFlow<Int> = playbackPreferences.skipBackSeconds
+    val skipForwardSeconds: StateFlow<Int> = playbackPreferences.skipForwardSeconds
+
+    fun setSkipBackSeconds(seconds: Int) = playbackPreferences.setSkipBackSeconds(seconds)
+    fun setSkipForwardSeconds(seconds: Int) = playbackPreferences.setSkipForwardSeconds(seconds)
 
     private var pendingSerial: String? = null
     private var pendingCodeVerifier: String? = null

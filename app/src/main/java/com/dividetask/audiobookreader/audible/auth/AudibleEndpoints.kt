@@ -84,4 +84,7 @@ object AudibleEndpoints {
 
     fun contentUrl(locale: Locale, asin: String): String =
         "https://${locale.apiDomain}/1.0/content/$asin/licenserequest"
+
+    fun contentMetadataUrl(locale: Locale, asin: String): String =
+        "https://${locale.apiDomain}/1.0/content/$asin/metadata"
 }

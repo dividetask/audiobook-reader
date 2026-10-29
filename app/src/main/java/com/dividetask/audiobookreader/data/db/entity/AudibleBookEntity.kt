@@ -13,6 +13,7 @@ data class AudibleBookEntity(
     val coverUrl: String?,
     val seriesTitle: String?,
     val seriesSequence: String?,
+    val seriesAsin: String? = null,
     val purchaseDate: String?,
     val lastSynced: Long = System.currentTimeMillis()
 )

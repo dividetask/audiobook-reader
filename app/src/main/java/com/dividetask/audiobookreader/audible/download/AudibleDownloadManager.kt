@@ -46,7 +46,8 @@ data class DownloadProgress(
     val totalBytes: Long,
     val state: DownloadState,
     val coverUrl: String? = null,
-    val debugLog: List<String> = emptyList()
+    val debugLog: List<String> = emptyList(),
+    val message: String? = null
 )
 
 enum class DownloadState {
@@ -62,7 +63,9 @@ class AudibleDownloadManager @Inject constructor(
     private val debugLog: AppDebugLog,
     private val tokenStore: AudibleTokenStore,
     private val converter: AaxConverter,
-    private val activationBytesProvider: ActivationBytesProvider
+    private val activationBytesProvider: ActivationBytesProvider,
+    private val pendingStore: PendingDownloadStore,
+    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -81,6 +84,30 @@ class AudibleDownloadManager @Inject constructor(
 
     private val queuedTitles = mutableMapOf<String, String>()
 
+    /** Books Audible's download limit turned away; retried by [PendingDownloadWorker]. */
+    val pendingDownloads: StateFlow<Map<String, PendingDownload>> = pendingStore.items
+
+    /**
+     * Set when a download the user started is blocked by the download limit, so the app
+     * can offer to get it from the Audible website instead. Not set for background retries.
+     */
+    private val _websiteOffer = MutableStateFlow<PendingDownload?>(null)
+    val websiteOffer: StateFlow<PendingDownload?> = _websiteOffer.asStateFlow()
+
+    /** Stops automatic retries for a pending book. */
+    fun removePending(asin: String) {
+        pendingStore.remove(asin)
+        requestLog.event("pending-removed", asin)
+        scheduleRetry()
+    }
+
+    fun dismissWebsiteOffer() {
+        _websiteOffer.value = null
+    }
+
+    /** Set when the download being processed was turned away by the download limit. */
+    private var throttledAsin: String? = null
+
     private val completedAsins = mutableSetOf<String>()
 
     private val audiobooksDir: File
@@ -98,10 +125,10 @@ class AudibleDownloadManager @Inject constructor(
             bookRepository.getAllBooks().collect { books ->
                 completedAsins.clear()
                 books.forEach { book ->
+                    // Any file in audiobooks/ named {asin}.{ext} — converted books are .m4b/.m4a, not .aax
                     val uri = book.fileUri
-                    if (uri.contains("/audiobooks/") && uri.endsWith(".aax")) {
-                        val asin = uri.substringAfterLast("/").substringBefore(".aax")
-                        completedAsins.add(asin)
+                    if (uri.contains("/audiobooks/")) {
+                        completedAsins.add(uri.substringAfterLast("/").substringBeforeLast("."))
                     }
                 }
             }
@@ -152,6 +179,17 @@ class AudibleDownloadManager @Inject constructor(
     private var activeAsin: String? = null
 
     fun queueDownload(book: AudibleBook) {
+        requestLog.event("download-requested", "${book.asin}${if (retrying) " (automatic retry)" else ""}")
+        if (apiClient.isThrottled) {
+            // Don't add to the throttle by asking now; try once the limit should be over
+            debugLog.log("DL", "Throttled — pending: ${book.title}")
+            val pending = markPending(book, turnedAway = false)
+            _downloadProgress.value = DownloadProgress(
+                book.asin, book.title, 0, 0, DownloadState.ERROR,
+                message = pendingMessage(pending)
+            )
+            return
+        }
         if (downloadQueue.any { it.asin == book.asin }) return
         if (activeAsin == book.asin) return
         if (_queuedAsins.value.contains(book.asin)) return
@@ -169,10 +207,14 @@ class AudibleDownloadManager @Inject constructor(
 
         currentDownloadJob = scope.launch {
             try {
+                // Active before it leaves the queue, so retryDuePending never sees it as neither
+                activeAsin = book.asin
                 _queuedAsins.value = _queuedAsins.value - book.asin
                 queuedTitles.remove(book.asin)
-                activeAsin = book.asin
+                throttledAsin = null
                 downloadBookWithRetry(book)
+                // Stays pending only while the download limit is what's stopping it
+                if (throttledAsin != book.asin) pendingStore.remove(book.asin)
             } finally {
                 activeAsin = null
                 currentDownloadJob = null
@@ -204,7 +246,23 @@ class AudibleDownloadManager @Inject constructor(
             waitForWifi()
         }
 
-        var downloadInfo = fetchDownloadInfo(asin, log) ?: return
+        var downloadInfo = fetchDownloadInfo(asin, log) ?: run {
+            if (apiClient.isThrottled) {
+                throttledAsin = asin
+                val pending = markPending(book, turnedAway = true)
+                dl("Pending — next try ${timeText(pending.nextAttemptAt)}")
+                _downloadProgress.value = DownloadProgress(
+                    asin, title, 0, 0, DownloadState.ERROR, bookCoverUrl, log,
+                    message = pendingMessage(pending)
+                )
+                return
+            }
+            _downloadProgress.value = DownloadProgress(
+                asin, title, 0, 0, DownloadState.ERROR, bookCoverUrl, log,
+                message = lastLicenseError ?: "Could not get a download link from Audible"
+            )
+            return
+        }
         var downloadUrl = downloadInfo.url
         var audibleKey = downloadInfo.key
         var audibleIv = downloadInfo.iv
@@ -439,14 +497,21 @@ class AudibleDownloadManager @Inject constructor(
         notificationManager.notify(id, notification)
     }
 
+    private var lastLicenseError: String? = null
+
+    companion object {
+        private val PENDING_BACKOFF_MS = longArrayOf(15 * 60_000L, 30 * 60_000L, 60 * 60_000L, 2 * 3_600_000L, 4 * 3_600_000L)
+    }
+
     private suspend fun fetchDownloadInfo(asin: String, log: MutableList<String>): com.dividetask.audiobookreader.audible.api.DownloadInfo? {
         fun dl(msg: String) { log.add(msg); debugLog.log("DL", msg) }
         dl("Getting download URL...")
         val result = apiClient.getDownloadUrl(asin)
         result.debugLog.forEach { debugLog.log("DL", it) }
         val info = result.data
+        lastLicenseError = result.error
         if (info == null) {
-            dl("ERROR: No download URL obtained")
+            dl("ERROR: No download URL obtained${result.error?.let { " — $it" } ?: ""}")
             return null
         }
         dl("Download URL: ${info.url.take(100)}...")
@@ -454,7 +519,121 @@ class AudibleDownloadManager @Inject constructor(
         return info
     }
 
+    // ---------------------------------------------------------------- Pending (download limit)
+
+    /**
+     * Adds or updates [book] on the pending list. Each time Audible turns it away the wait
+     * grows (15 min, 30 min, 1 h, 2 h, then every 4 h), with ±20% jitter so pending books
+     * don't all ask at once — and never before Audible's limit should have lifted.
+     */
+    private fun markPending(book: AudibleBook, turnedAway: Boolean): PendingDownload {
+        val existing = pendingStore.get(book.asin)
+        val attempts = (existing?.attempts ?: 0) + if (turnedAway) 1 else 0
+        val now = System.currentTimeMillis()
+        val backoff = PENDING_BACKOFF_MS[(attempts - 1).coerceIn(0, PENDING_BACKOFF_MS.size - 1)]
+        val jittered = (backoff * kotlin.random.Random.nextDouble(0.8, 1.2)).toLong()
+        val afterLimit = apiClient.throttledUntil + kotlin.random.Random.nextLong(60_000, 5 * 60_000)
+        val pending = PendingDownload(
+            asin = book.asin,
+            title = book.title,
+            author = book.authors?.firstOrNull()?.name,
+            coverUrl = book.productImages?.image500 ?: book.productImages?.image1024,
+            runtimeMinutes = book.runtimeLengthMin,
+            attempts = attempts,
+            nextAttemptAt = maxOf(now + jittered, afterLimit)
+        )
+        pendingStore.put(pending)
+        debugLog.log("DL", "Pending: ${book.title} (turned away $attempts×), next try ${timeText(pending.nextAttemptAt)}")
+        requestLog.event("pending", "${book.asin} turned away $attempts×, next try ${timeText(pending.nextAttemptAt)}")
+        if (!retrying) _websiteOffer.value = pending
+        scheduleRetry()
+        return pending
+    }
+
+    private fun pendingMessage(pending: PendingDownload) =
+        "Audible is limiting downloads. \"${pending.title}\" will download automatically — next try ${timeText(pending.nextAttemptAt)}."
+
+    private fun timeText(millis: Long): String =
+        java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(java.util.Date(millis))
+
+    /** True while [retryDuePending] runs; it reschedules when done (rescheduling now would cancel it). */
+    @Volatile private var retrying = false
+
+    /**
+     * Schedules [PendingDownloadWorker] for the earliest pending book, or cancels it if none.
+     * AudiobookApp calls this at startup.
+     */
+    fun scheduleRetry() {
+        if (retrying) return
+        val workManager = androidx.work.WorkManager.getInstance(context)
+        val next = pendingStore.items.value.values.minOfOrNull { it.nextAttemptAt }
+        if (next == null) {
+            workManager.cancelUniqueWork(PendingDownloadWorker.WORK_NAME)
+            return
+        }
+        val constraints = androidx.work.Constraints.Builder()
+            .setRequiredNetworkType(
+                if (tokenStore.wifiOnlyDownloads) androidx.work.NetworkType.UNMETERED else androidx.work.NetworkType.CONNECTED
+            )
+            .build()
+        val request = androidx.work.OneTimeWorkRequestBuilder<PendingDownloadWorker>()
+            .setInitialDelay((next - System.currentTimeMillis()).coerceAtLeast(0), java.util.concurrent.TimeUnit.MILLISECONDS)
+            .setConstraints(constraints)
+            .build()
+        workManager.enqueueUniqueWork(PendingDownloadWorker.WORK_NAME, androidx.work.ExistingWorkPolicy.REPLACE, request)
+    }
+
+    /**
+     * Tries each pending book that's due, one at a time with 1–3 minutes between them,
+     * stopping as soon as Audible's limit kicks in again. Returns once they've finished.
+     */
+    suspend fun retryDuePending() {
+        val due = pendingStore.items.value.values
+            .filter { it.nextAttemptAt <= System.currentTimeMillis() + 60_000 }
+            .sortedBy { it.nextAttemptAt }
+        debugLog.section("Retry pending downloads (${due.size} due)")
+        requestLog.event("retry-run", "${due.size} due: ${due.joinToString(",") { it.asin }}")
+        retrying = true
+        try {
+            retryEach(due)
+        } finally {
+            retrying = false
+        }
+        // Anything turned away again (or never tried) has a new time
+        for (pending in pendingStore.items.value.values) {
+            if (pending.nextAttemptAt <= System.currentTimeMillis()) {
+                pendingStore.put(pending.copy(nextAttemptAt = maxOf(apiClient.throttledUntil, System.currentTimeMillis()) +
+                    kotlin.random.Random.nextLong(5 * 60_000, 15 * 60_000)))
+            }
+        }
+        scheduleRetry()
+    }
+
+    private suspend fun retryEach(due: List<PendingDownload>) {
+        for ((i, pending) in due.withIndex()) {
+            if (apiClient.isThrottled) {
+                debugLog.log("DL", "Still limited by Audible — trying the rest later")
+                break
+            }
+            if (i > 0) delay(kotlin.random.Random.nextLong(60_000, 180_000))
+            val book = AudibleBook(
+                asin = pending.asin,
+                title = pending.title,
+                authors = pending.author?.let { listOf(com.dividetask.audiobookreader.audible.api.AudiblePerson(it)) },
+                runtimeLengthMin = pending.runtimeMinutes,
+                productImages = pending.coverUrl?.let { com.dividetask.audiobookreader.audible.api.AudibleImages(image500 = it) }
+            )
+            debugLog.log("DL", "Retrying pending: ${pending.title}")
+            queueDownload(book)
+            // Wait for this book to finish before asking Audible for the next one
+            while (activeAsin == book.asin || book.asin in _queuedAsins.value) delay(2_000)
+        }
+    }
+
     fun cancelDownload() {
+        // Cancelling also stops automatic retries for it
+        activeAsin?.let { pendingStore.remove(it) }
+        scheduleRetry()
         currentDownloadJob?.cancel()
         downloadQueue.clear()
         _queuedAsins.value = emptySet()

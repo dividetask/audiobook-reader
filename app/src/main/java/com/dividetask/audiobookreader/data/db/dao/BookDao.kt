@@ -23,6 +23,9 @@ interface BookDao {
     @Query("UPDATE books SET fileUri = :fileUri WHERE id = :bookId")
     suspend fun updateFileUri(bookId: Long, fileUri: String)
 
+    @Query("UPDATE books SET chaptersChecked = 1 WHERE id = :bookId")
+    suspend fun setChaptersChecked(bookId: Long)
+
     @Query("DELETE FROM books WHERE id = :id")
     suspend fun delete(id: Long)
 

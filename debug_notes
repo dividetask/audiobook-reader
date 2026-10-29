@@ -1,5 +1,0 @@
-sudo apt install ffmpeg pipx
-pipx install audible-cli
-audible quickstart
-audible library list                       # shows ASINs and titles
-audible download --asin B0XXXXXXXX --aaxc --cover --chapter
