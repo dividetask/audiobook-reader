@@ -16,5 +16,7 @@ data class BookEntity(
     val dateAdded: Long = System.currentTimeMillis(),
     val lastPlayed: Long = 0,
     /** True once chapter extraction has run, so it isn't retried on every open. */
-    val chaptersChecked: Boolean = false
+    val chaptersChecked: Boolean = false,
+    /** Audible ASIN from the file's tags; "" once the tags were read and had none. */
+    val asin: String? = null
 )

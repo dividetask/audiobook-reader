@@ -35,16 +35,26 @@ class SeriesIndex(
         return SeriesRef(seriesAsin, title, book.asin, book.seriesSequence)
     }
 
-    /** Audible downloads are named after their ASIN; anything else is matched by title. */
+    /**
+     * Audible downloads are named after their ASIN; other files may carry one in their
+     * tags. Anything else is matched by title.
+     */
     fun forLocal(book: BookEntity): SeriesRef? {
         asinFromFileUri(book.fileUri)?.let { libraryByAsin[it] }?.let { return forAudible(it) }
+        book.asin?.takeIf { it.isNotEmpty() }?.let { asin ->
+            libraryByAsin[asin]?.let { return forAudible(it) }
+            lookupsByKey[asinKey(asin)]?.let(::fromLookup)?.let { return it }
+        }
         return forTitle(book.title, book.author)
     }
 
     /** A book known only by title and author: matched to the Audible library, else to a catalog lookup. */
     fun forTitle(title: String, author: String?): SeriesRef? {
         matchLibrary(title, author)?.let { return forAudible(it) }
-        val lookup = lookupsByKey[lookupKey(title, author)] ?: return null
+        return lookupsByKey[lookupKey(title, author)]?.let(::fromLookup)
+    }
+
+    private fun fromLookup(lookup: SeriesLookupEntity): SeriesRef? {
         val seriesAsin = lookup.seriesAsin ?: return null
         val seriesTitle = seriesTitles[seriesAsin] ?: lookup.seriesTitle ?: return null
         return SeriesRef(seriesAsin, seriesTitle, lookup.asin, lookup.sequence)
@@ -65,6 +75,9 @@ class SeriesIndex(
 
         fun lookupKey(title: String, author: String?): String =
             normalize(title) + "|" + normalize(author.orEmpty())
+
+        /** Lookup key for a book found by the ASIN in its tags. */
+        fun asinKey(asin: String): String = "asin:$asin"
 
         fun asinFromFileUri(fileUri: String): String? = FILE_ASIN.find(fileUri)?.groupValues?.get(1)
 

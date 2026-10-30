@@ -102,13 +102,19 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
     }
 }
 
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE books ADD COLUMN asin TEXT")
+    }
+}
+
 @Database(
     entities = [
         BookEntity::class, ChapterEntity::class, AudibleBookEntity::class,
         ListenSessionEntity::class, PositionJumpEntity::class,
         SeriesEntity::class, SeriesBookEntity::class, SeriesLookupEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

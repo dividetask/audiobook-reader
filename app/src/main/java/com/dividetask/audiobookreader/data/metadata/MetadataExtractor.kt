@@ -3,6 +3,7 @@ package com.dividetask.audiobookreader.data.metadata
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.dividetask.audiobookreader.data.db.entity.BookEntity
 import com.dividetask.audiobookreader.data.db.entity.ChapterEntity
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -16,7 +17,8 @@ data class BookMetadata(
     val author: String,
     val durationMs: Long,
     val coverUri: String?,
-    val chapters: List<ChapterMetadata>
+    val chapters: List<ChapterMetadata>,
+    val asin: String? = null
 )
 
 data class ChapterMetadata(
@@ -50,11 +52,30 @@ class MetadataExtractor @Inject constructor(
                 author = author,
                 durationMs = durationMs,
                 coverUri = coverUri,
-                chapters = emptyList()
+                chapters = emptyList(),
+                asin = readAsin(uri)
             )
         } finally {
             retriever.release()
         }
+    }
+
+    /**
+     * The Audible ASIN in the file's tags, if it has one. Tools that save Audible books
+     * write it under keys like "ASIN", "AUDIBLE_ASIN" or "CDEK".
+     */
+    fun readAsin(uri: Uri): String? = try {
+        val input = when (uri.scheme) {
+            "content" -> FFmpegKitConfig.getSafParameterForRead(context, uri)
+            else -> uri.path
+        }
+        input?.let { ffprobeJson("-show_format", it) }?.optJSONObject("format")?.optJSONObject("tags")?.let { tags ->
+            tags.keys().asSequence()
+                .filter { it.contains("asin", ignoreCase = true) || it.equals("cdek", ignoreCase = true) }
+                .firstNotNullOfOrNull { ASIN.find(tags.optString(it).uppercase())?.value }
+        }
+    } catch (e: Exception) {
+        null
     }
 
     private fun extractCoverArt(retriever: MediaMetadataRetriever, sourceUri: Uri): String? {
@@ -72,7 +93,8 @@ class MetadataExtractor @Inject constructor(
             author = metadata.author,
             coverUri = metadata.coverUri,
             fileUri = uri.toString(),
-            durationMs = metadata.durationMs
+            durationMs = metadata.durationMs,
+            asin = metadata.asin.orEmpty()
         )
     }
 
@@ -86,5 +108,10 @@ class MetadataExtractor @Inject constructor(
                 index = chapter.index
             )
         }
+    }
+
+    private companion object {
+        // Audible ASINs ("B0…") or ISBN-10s
+        val ASIN = Regex("\\b(B0[A-Z0-9]{8}|\\d{9}[\\dX])\\b")
     }
 }
