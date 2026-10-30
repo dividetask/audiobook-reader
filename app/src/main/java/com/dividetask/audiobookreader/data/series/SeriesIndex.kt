@@ -28,6 +28,8 @@ class SeriesIndex(
 
     /** Every title Audible lists for each series, owned or not. */
     val booksBySeries: Map<String, List<SeriesBookEntity>> = seriesBooks.groupBy { it.seriesAsin }
+    private val seriesBooksByAsin = seriesBooks.associateBy { it.asin }
+    private val seriesBooksByTitle = seriesBooks.groupBy { normalize(it.title) }
 
     fun forAudible(book: AudibleBookEntity): SeriesRef? {
         val seriesAsin = book.seriesAsin ?: return null
@@ -43,15 +45,38 @@ class SeriesIndex(
         asinFromFileUri(book.fileUri)?.let { libraryByAsin[it] }?.let { return forAudible(it) }
         book.asin?.takeIf { it.isNotEmpty() }?.let { asin ->
             libraryByAsin[asin]?.let { return forAudible(it) }
+            seriesBooksByAsin[asin]?.let { return fromSeriesBook(it) }
             lookupsByKey[asinKey(asin)]?.let(::fromLookup)?.let { return it }
         }
         return forTitle(book.title, book.author)
     }
 
-    /** A book known only by title and author: matched to the Audible library, else to a catalog lookup. */
+    /**
+     * A book known only by title and author: matched to the Audible library, else to a
+     * title in a series already fetched, else to a catalog lookup.
+     */
     fun forTitle(title: String, author: String?): SeriesRef? {
         matchLibrary(title, author)?.let { return forAudible(it) }
+        matchSeriesList(title, author)?.let { return fromSeriesBook(it) }
         return lookupsByKey[lookupKey(title, author)]?.let(::fromLookup)
+    }
+
+    /**
+     * A title in a fetched series list (e.g. a book bought elsewhere in a series the user
+     * has on Audible). The author must match when both are known, since short titles repeat.
+     */
+    fun matchSeriesList(title: String, author: String?): SeriesBookEntity? {
+        val wanted = author?.takeUnless { it.isBlank() || it.startsWith("Unknown") }?.let(::normalize)
+        return seriesBooksByTitle[normalize(title)].orEmpty().firstOrNull { book ->
+            wanted == null || book.author == null || normalize(book.author) == wanted
+        }
+    }
+
+    fun inSeriesList(asin: String): Boolean = asin in seriesBooksByAsin
+
+    private fun fromSeriesBook(book: SeriesBookEntity): SeriesRef? {
+        val seriesTitle = seriesTitles[book.seriesAsin] ?: return null
+        return SeriesRef(book.seriesAsin, seriesTitle, book.asin, book.sequence)
     }
 
     private fun fromLookup(lookup: SeriesLookupEntity): SeriesRef? {

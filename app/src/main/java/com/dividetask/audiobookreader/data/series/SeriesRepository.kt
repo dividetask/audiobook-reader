@@ -76,7 +76,7 @@ class SeriesRepository @Inject constructor(
         debugLog.section("Series Sync")
         val now = System.currentTimeMillis()
         val library = audibleBookDao.getAllOnce()
-        val index = SeriesIndex(library)
+        val index = SeriesIndex(library, seriesDao.getAllBooksOnce(), series = seriesDao.getAllSeriesOnce())
         logDuplicates(library)
 
         // Files added before ASINs were read from tags: read them once
@@ -95,9 +95,12 @@ class SeriesRepository @Inject constructor(
         // once for a book (re)added since it was saved
         fun isDue(previous: SeriesLookupEntity?, addedAt: Long = 0L) = previous == null || previous.checkedAt < addedAt ||
             (previous.seriesAsin == null && (now - previous.checkedAt >= MISS_RETRY_MS || previous.checkedAt <= MATCHING_CHANGED_AT))
+        // Books in a series list already fetched need no lookup
         val notInLibrary = localBooks.filter { book ->
-            listOfNotNull(SeriesIndex.asinFromFileUri(book.fileUri), book.asin).none { it in index.libraryByAsin } &&
-                index.matchLibrary(book.title, book.author) == null
+            listOfNotNull(SeriesIndex.asinFromFileUri(book.fileUri), book.asin)
+                .none { it in index.libraryByAsin || index.inSeriesList(it) } &&
+                index.matchLibrary(book.title, book.author) == null &&
+                index.matchSeriesList(book.title, book.author) == null
         }
         var lookedUp = 0
         for (book in notInLibrary.filter { !it.asin.isNullOrEmpty() }.distinctBy { it.asin }) {
@@ -116,7 +119,7 @@ class SeriesRepository @Inject constructor(
                 .filter { book -> book.asin.isNullOrEmpty() || known[SeriesIndex.asinKey(book.asin)]?.seriesAsin == null }
                 .forEach { add(Triple(it.title, it.author, it.dateAdded)) }
             remoteLibrary.files.value
-                .filter { index.matchLibrary(it.title, it.folder) == null }
+                .filter { index.matchLibrary(it.title, it.folder) == null && index.matchSeriesList(it.title, it.folder) == null }
                 .forEach { add(Triple(it.title, it.folder.ifEmpty { null }, 0L)) }
         }.distinctBy { (title, author) -> SeriesIndex.lookupKey(title, author) }
 
@@ -145,7 +148,7 @@ class SeriesRepository @Inject constructor(
         for (seriesAsin in due) {
             if (fetchSeries(seriesAsin, titles[seriesAsin])) fetched++
         }
-        debugLog.log("SERIES", "Looked up $lookedUp of ${unmatched.size} non-Audible books; fetched $fetched of ${due.size} due series (${titles.size} total)")
+        debugLog.log("SERIES", "Looked up $lookedUp for ${notInLibrary.size} local books not on Audible and ${unmatched.size} titles to search; fetched $fetched of ${due.size} due series (${titles.size} total)")
     }
 
     /** Stores every title in the series. False when Audible couldn't be reached. */
@@ -243,8 +246,11 @@ class SeriesRepository @Inject constructor(
                 debugLog.log("SERIES", "Lookup failed for $title: ${result.error}")
                 return null
             }
-            match = bestMatch(data["products"].arr().mapNotNull { it.obj() }, title)
+            val products = data["products"].arr().mapNotNull { it.obj() }
+            match = bestMatch(products, title)
             if (match != null) break
+            debugLog.log("SERIES", "  ${query.keys.joinToString("+")} search for $title: ${products.size} results" +
+                products.take(3).joinToString(prefix = if (products.isEmpty()) "" else ": ") { "${it["title"].str()} / ${it["subtitle"].str()}" })
         }
         val series = match?.get("series").arr().firstOrNull().obj()
         debugLog.log("SERIES", "Lookup $title: ${match?.let { "${it["asin"].str()} ${it["title"].str()} / ${series?.get("title").str() ?: "no series"}" } ?: "no match"}")
@@ -264,7 +270,8 @@ class SeriesRepository @Inject constructor(
             debugLog.log("SERIES", "Lookup failed for $asin: ${result.error}")
             return null
         }
-        val product = result.data?.get("product").obj()
+        // Products not sold here come back without details
+        val product = result.data?.get("product").obj()?.takeIf { it["title"].str() != null }
         val series = product?.get("series").arr().firstOrNull().obj()
         debugLog.log("SERIES", "Lookup $asin: ${product?.let { "${it["title"].str()} / ${series?.get("title").str() ?: "no series"}" } ?: "not in catalog"}")
         return SeriesLookupEntity(
