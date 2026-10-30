@@ -208,6 +208,42 @@ class SeriesRepository @Inject constructor(
         if (repeated > 0) debugLog.log("SERIES", "$repeated titles are listed under more than one ASIN")
     }
 
+    /**
+     * Searches the catalog for the book, owned or not. Null when Audible couldn't be reached.
+     * Searches by title first, then by keywords, since a file's title is often the
+     * book's subtitle on Audible ("Fated Antagonist" for "Chrysalis 7").
+     */
+    private suspend fun lookUp(key: String, title: String, author: String?): SeriesLookupEntity? {
+        val knownAuthor = author?.takeUnless { it.isBlank() || it.startsWith("Unknown") }
+        val byTitle = mutableMapOf("title" to title)
+        knownAuthor?.let { byTitle["author"] = it }
+        val byKeywords = mapOf("keywords" to listOfNotNull(title, knownAuthor).joinToString(" "))
+
+        var match: JsonObject? = null
+        for (query in listOf(byTitle, byKeywords)) {
+            val result = apiClient.getCatalog("products", query + mapOf(
+                "num_results" to "10",
+                "products_sort_by" to "Relevance",
+                "response_groups" to "series,contributors,product_attrs"
+            ))
+            val data = result.data ?: run {
+                debugLog.log("SERIES", "Lookup failed for $title: ${result.error}")
+                return null
+            }
+            match = bestMatch(data["products"].arr().mapNotNull { it.obj() }, title)
+            if (match != null) break
+        }
+        val series = match?.get("series").arr().firstOrNull().obj()
+        debugLog.log("SERIES", "Lookup $title: ${match?.let { "${it["asin"].str()} ${it["title"].str()} / ${series?.get("title").str() ?: "no series"}" } ?: "no match"}")
+        return SeriesLookupEntity(
+            key = key,
+            asin = match?.get("asin").str(),
+            seriesAsin = series?.get("asin").str(),
+            seriesTitle = series?.get("title").str(),
+            sequence = series?.get("sequence").str()
+        )
+    }
+
     /** Finds the book in the catalog by ASIN. Null when Audible couldn't be reached. */
     private suspend fun lookUpAsin(key: String, asin: String): SeriesLookupEntity? {
         val result = apiClient.getCatalog("products/$asin", mapOf("response_groups" to "series,product_attrs"))
