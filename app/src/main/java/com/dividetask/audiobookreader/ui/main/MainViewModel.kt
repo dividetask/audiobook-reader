@@ -96,11 +96,19 @@ class MainViewModel @Inject constructor(
     private var lastSyncTime = 0L
     private val syncCooldownMs = 300_000L // 5 minutes
 
-    /** Opening a tab syncs at most every 5 minutes; [force] (pull to refresh) always fetches. */
+    /**
+     * Opening a tab syncs at most every 5 minutes; [force] (pull to refresh) fetches unless
+     * the last sync was under 30 s ago, so a pull right after opening the tab isn't a
+     * second library request.
+     */
     fun syncAudibleLibrary(force: Boolean = false) {
         if (!tokenStore.isAuthenticated || _isSyncing.value) return
         val now = System.currentTimeMillis()
-        if (!force && now - lastSyncTime < syncCooldownMs) return
+        val cooldown = if (force) FORCED_SYNC_COOLDOWN_MS else syncCooldownMs
+        if (now - lastSyncTime < cooldown) {
+            if (force) debugLog.log("SYNC", "Library synced ${(now - lastSyncTime) / 1000}s ago — not fetching again")
+            return
+        }
         lastSyncTime = now
 
         viewModelScope.launch {
@@ -465,5 +473,6 @@ class MainViewModel @Inject constructor(
     private companion object {
         val AUDIO_EXTENSIONS = listOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "wma")
         val IMAGE_EXTENSIONS = listOf("jpg", "jpeg", "png")
+        const val FORCED_SYNC_COOLDOWN_MS = 30_000L
     }
 }
