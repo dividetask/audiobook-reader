@@ -166,10 +166,13 @@ fun MainScreen(
         }
     }
 
-    // Download failures (e.g. Audible throttling) are otherwise silent on the Audible tab
+    // Download failures (e.g. Audible throttling) are otherwise silent on the Audible tab.
+    // Shown once each, not again every time the screen is opened.
+    var shownDownloadError by rememberSaveable { mutableStateOf<String?>(null) }
     LaunchedEffect(downloadProgress?.state, downloadProgress?.message) {
         val progress = downloadProgress
-        if (progress?.state == DownloadState.ERROR && progress.message != null) {
+        if (progress?.state == DownloadState.ERROR && progress.message != null && progress.message != shownDownloadError) {
+            shownDownloadError = progress.message
             snackbarHostState.showSnackbar(progress.message)
         }
     }

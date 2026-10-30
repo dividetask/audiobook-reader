@@ -131,6 +131,10 @@ class AudibleDownloadManager @Inject constructor(
                         completedAsins.add(uri.substringAfterLast("/").substringBeforeLast("."))
                     }
                 }
+                // A book imported another way (e.g. from the website) is no longer waiting to download
+                _downloadProgress.value?.takeIf { it.state == DownloadState.ERROR && it.asin in completedAsins }?.let {
+                    _downloadProgress.value = null
+                }
             }
         }
     }
