@@ -131,6 +131,21 @@ class MainViewModel @Inject constructor(
 
     fun clearAaxImportStatus() = aaxImporter.clearStatus()
 
+    /** One file is a book; several are the parts of one book, joined into a single file. */
+    fun importLocalBooks(uris: List<Uri>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val files = uris.map { it to displayName(it) }
+            val audio = files.filter { (_, name) -> AUDIO_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) } }
+            when {
+                files.size == 1 -> importLocalBook(uris[0])
+                files.any { it.second.endsWith(".aax", ignoreCase = true) } ->
+                    _importError.value = "Add .aax files one at a time"
+                audio.size == 1 -> importLocalBook(audio[0].first)
+                else -> aaxImporter.importJoined(files)
+            }
+        }
+    }
+
     fun importLocalBook(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -423,4 +438,8 @@ class MainViewModel @Inject constructor(
     }
 
     fun clearError() { _importError.value = null }
+
+    private companion object {
+        val AUDIO_EXTENSIONS = listOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "wma")
+    }
 }

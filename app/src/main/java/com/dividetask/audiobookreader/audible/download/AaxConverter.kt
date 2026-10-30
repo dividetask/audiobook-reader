@@ -127,6 +127,43 @@ class AaxConverter @Inject constructor(
         }
     }
 
+    /**
+     * Joins audio files of one book (any format, e.g. one MP3 per chapter) into one AAC
+     * .m4b at [bitrate] bits/s, with the tags and chapters in [metadata] (an FFMETADATA file).
+     */
+    fun joinToM4b(
+        parts: List<File>,
+        metadata: File,
+        outFile: File,
+        bitrate: Int,
+        durationMs: Long?,
+        onProgress: ((Float) -> Unit)? = null
+    ): Boolean {
+        debugLog.section("Join ${parts.size} files: ${outFile.name}")
+        val list = File(outFile.parentFile, "concat.txt")
+        list.writeText(parts.joinToString("\n") { "file '${it.absolutePath.replace("'", "'\\''")}'" })
+        val cmd = "-y -f concat -safe 0 -i \"${list.absolutePath}\" -i \"${metadata.absolutePath}\" " +
+            "-map 0:a -map_metadata 1 -map_chapters 1 -c:a aac -b:a $bitrate -f mp4 \"${outFile.absolutePath}\""
+        debugLog.log("CONV", "Encoding to AAC at ${bitrate / 1000}k")
+        return try {
+            val session = run(cmd, durationMs, onProgress)
+            val ok = ReturnCode.isSuccess(session.returnCode) && outFile.exists() && outFile.length() > 1000
+            if (ok) {
+                debugLog.log("CONV", "Joined: ${outFile.length() / 1_048_576}MB")
+            } else {
+                debugLog.log("CONV", "Join failed: ${(session.allLogsAsString ?: "").lines().takeLast(5).joinToString(" | ")}")
+                outFile.delete()
+            }
+            ok
+        } catch (e: Exception) {
+            debugLog.log("CONV", "Join exception: ${e.message}")
+            outFile.delete()
+            false
+        } finally {
+            list.delete()
+        }
+    }
+
     fun convertWithKeyIv(aaxFile: File, key: String, iv: String, onProgress: ((Float) -> Unit)? = null): File? {
         val m4bFile = File(aaxFile.parent, aaxFile.nameWithoutExtension + ".m4b")
 

@@ -48,7 +48,9 @@ class AaxImporter @Inject constructor(
     private val activationBytesProvider: ActivationBytesProvider,
     private val pendingStore: PendingDownloadStore,
     private val debugLog: AppDebugLog,
-    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog
+    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog,
+    private val metadataExtractor: com.dividetask.audiobookreader.data.metadata.MetadataExtractor,
+    private val seriesRepository: com.dividetask.audiobookreader.data.series.SeriesRepository
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -97,6 +99,165 @@ class AaxImporter @Inject constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Imports a book split into several audio files (e.g. one MP3 per chapter): copies them
+     * in file-name order, joins them into one AAC .m4b with a chapter per file, and takes
+     * the title, author and cover from the files. Playlists, text and other non-audio files
+     * among [files] (uri to file name) are skipped; an image among them is used as the cover.
+     */
+    fun importJoined(files: List<Pair<Uri, String>>) {
+        scope.launch { mutex.withLock { runJoin(files) } }
+    }
+
+    private suspend fun runJoin(files: List<Pair<Uri, String>>) {
+        fun ext(name: String) = name.substringAfterLast('.', "").lowercase()
+        // Natural order, so "2-…" comes before "10-…"
+        val byName = compareBy<Pair<Uri, String>> { (_, name) -> name.lowercase().replace(Regex("\\d+")) { it.value.padStart(10, '0') } }
+        val audio = files.filter { ext(it.second) in AUDIO_EXTENSIONS }.sortedWith(byName)
+        val image = files.filter { ext(it.second) in IMAGE_EXTENSIONS }.sortedWith(byName).firstOrNull()
+
+        var title = audio.firstOrNull()?.second?.substringBeforeLast('.') ?: "Book"
+        debugLog.section("Import files: ${audio.size} audio of ${files.size} picked")
+        importDir.listFiles()?.forEach { it.delete() }
+        fun step(text: String) {
+            debugLog.log("IMPORT", text)
+            _status.value = AaxImportStatus(title, text)
+        }
+        var lastProgressAt = 0L
+        fun progress(text: String, fraction: Float) {
+            val now = System.currentTimeMillis()
+            if (now - lastProgressAt < 250 && fraction < 1f) return
+            lastProgressAt = now
+            _status.value = AaxImportStatus(title, text, progress = fraction)
+        }
+        fun fail(text: String) {
+            debugLog.log("IMPORT", "FAILED: $text")
+            _status.value = AaxImportStatus(title, "Import failed: $text", finished = true)
+            importDir.listFiles()?.forEach { it.delete() }
+        }
+
+        try {
+            if (audio.isEmpty()) return fail("None of the picked files is audio")
+            files.filter { it !in audio && it != image }.forEach { debugLog.log("IMPORT", "Skipped: ${it.second}") }
+
+            val parts = mutableListOf<File>()
+            for ((i, file) in audio.withIndex()) {
+                val label = "Copying file ${i + 1} of ${audio.size}"
+                if (i == 0) step(label)
+                val part = File(importDir, "part%04d.%s".format(i + 1, ext(file.second)))
+                copyFromUri(file.first, part) { progress(label, (i + it) / audio.size) }
+                    ?.let { return fail("${file.second}: $it") }
+                parts += part
+            }
+
+            val first = probeFormat(parts[0])
+            val firstTags = first?.optJSONObject("tags")
+            // Tag names vary in case between formats ("album" in MP3, "ALBUM" in FLAC)
+            val tags = firstTags?.let { t -> t.keys().asSequence().associate { it.lowercase() to t.optString(it) } }.orEmpty()
+            fun tag(vararg keys: String) = keys.firstNotNullOfOrNull { tags[it]?.takeIf(String::isNotBlank) }
+            title = tag("album") ?: tag("title") ?: title
+            val author = tag("album_artist", "artist") ?: "Unknown Author"
+            debugLog.log("IMPORT", "Tags: album=${tag("album")}, artist=$author")
+
+            // One chapter per file, named by its title tag or else its file name
+            val chapters = mutableListOf<ChapterEntity>()
+            var offset = 0L
+            for ((i, part) in parts.withIndex()) {
+                val format = if (i == 0) first else probeFormat(part)
+                val length = format?.optString("duration")?.toDoubleOrNull()?.times(1000)?.toLong() ?: 0L
+                val name = format?.optJSONObject("tags")?.optString("title")?.takeIf { it.isNotBlank() }
+                    ?: audio[i].second.substringBeforeLast('.')
+                chapters += ChapterEntity(bookId = 0, title = name, startPositionMs = offset,
+                    endPositionMs = offset + length, index = i)
+                offset += length
+            }
+
+            val metadata = File(importDir, "metadata.txt")
+            metadata.writeText(ffMetadata(title, author, chapters))
+            // Keep about the source's bitrate (audiobooks are often 64k); AAC needs no more
+            val bitrate = (first?.optString("bit_rate")?.toIntOrNull() ?: 64_000).coerceIn(48_000, 128_000)
+            val baseName = "import_${System.currentTimeMillis()}"
+            val out = File(importDir, "$baseName.m4b")
+            val label = "Converting ${parts.size} files"
+            step(label)
+            if (!converter.joinToM4b(parts, metadata, out, bitrate, offset) { progress(label, it) }) {
+                return fail("Converting failed — see the debug log")
+            }
+            parts.forEach { it.delete() }
+            metadata.delete()
+
+            val dest = File(audiobooksDir, out.name)
+            if (!out.renameTo(dest)) {
+                out.copyTo(dest, overwrite = true)
+                out.delete()
+            }
+            val cover = saveCover(baseName, image?.first, audio[0].first)
+            val asin = metadataExtractor.readAsin(audio[0].first).orEmpty()
+            bookRepository.insertBook(
+                BookEntity(
+                    title = title,
+                    author = author,
+                    coverUri = cover,
+                    fileUri = Uri.fromFile(dest).toString(),
+                    durationMs = durationMsOf(dest) ?: offset,
+                    chaptersChecked = true,
+                    asin = asin
+                ),
+                chapters
+            )
+            debugLog.log("IMPORT", "Added to library: ${dest.name}, ${chapters.size} chapters${if (asin.isNotEmpty()) ", ASIN $asin" else ""}")
+            seriesRepository.refresh()
+            _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
+        } catch (e: Exception) {
+            fail("${e::class.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun probeFormat(file: File) = try {
+        ffprobeJson("-show_format", file.absolutePath)?.optJSONObject("format")
+    } catch (e: Exception) {
+        null
+    }
+
+    /** An FFMETADATA file giving the joined book its tags and chapters. */
+    private fun ffMetadata(title: String, author: String, chapters: List<ChapterEntity>): String {
+        fun esc(s: String) = s.replace(Regex("([=;#\\\\\n])"), "\\\\$1")
+        return buildString {
+            appendLine(";FFMETADATA1")
+            appendLine("title=${esc(title)}")
+            appendLine("album=${esc(title)}")
+            appendLine("artist=${esc(author)}")
+            appendLine("genre=Audiobook")
+            for (c in chapters) {
+                appendLine("[CHAPTER]")
+                appendLine("TIMEBASE=1/1000")
+                appendLine("START=${c.startPositionMs}")
+                appendLine("END=${c.endPositionMs}")
+                appendLine("title=${esc(c.title)}")
+            }
+        }
+    }
+
+    /** Saves the picked image, else the first file's embedded picture, as the book's cover. */
+    private fun saveCover(baseName: String, image: Uri?, firstAudio: Uri?): String? {
+        val bytes = image?.let { context.contentResolver.openInputStream(it)?.use { s -> s.readBytes() } }
+            ?: firstAudio?.let { uri ->
+                val retriever = android.media.MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(context, uri)
+                    retriever.embeddedPicture
+                } catch (e: Exception) {
+                    null
+                } finally {
+                    retriever.release()
+                }
+            }
+            ?: return null
+        val file = File(File(context.filesDir, "covers").apply { mkdirs() }, "$baseName.jpg")
+        file.writeBytes(bytes)
+        return Uri.fromFile(file).toString()
     }
 
     fun clearStatus() {
@@ -382,4 +543,9 @@ class AaxImporter @Inject constructor(
     }
 
     private fun normalize(s: String): String = s.lowercase().replace(Regex("[^a-z0-9]"), "")
+
+    private companion object {
+        val AUDIO_EXTENSIONS = setOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "wma")
+        val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png")
+    }
 }

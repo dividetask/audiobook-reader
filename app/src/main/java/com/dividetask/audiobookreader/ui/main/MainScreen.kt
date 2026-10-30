@@ -145,10 +145,11 @@ fun MainScreen(
         }
     }
 
+    // Several files picked together are one book split into parts (e.g. one per chapter)
     val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let { viewModel.importLocalBook(it) }
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) viewModel.importLocalBooks(uris)
     }
 
     LaunchedEffect(importError) {
@@ -233,7 +234,7 @@ fun MainScreen(
         floatingActionButton = {
             if (selectedTab == 0) {
                 FloatingActionButton(onClick = {
-                    filePickerLauncher.launch(arrayOf("audio/*", "application/octet-stream", "audio/vnd.audible.aax", "audio/aax"))
+                    filePickerLauncher.launch(arrayOf("audio/*", "image/*", "application/octet-stream", "audio/vnd.audible.aax", "audio/aax"))
                 }) {
                     Icon(Icons.Default.Add, contentDescription = "Add Book")
                 }

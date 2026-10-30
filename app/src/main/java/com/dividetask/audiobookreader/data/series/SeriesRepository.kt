@@ -170,7 +170,8 @@ class SeriesRepository @Inject constructor(
         // Every relationship as Audible sent it, to find what marks the titles its app hides
         product["relationships"].arr().mapNotNull { it.obj() }.forEach { rel ->
             val details = rel["asin"].str()?.let { info[it] }?.let { JsonObject(it - LOG_SKIP_FIELDS) }
-            debugLog.log("SERIES", "$seriesAsin relationship $rel -> ${details ?: "no details"}")
+            // Verbose only: a full sync logs every title of every series
+            debugLog.log("SERIES", "$seriesAsin relationship $rel -> ${details ?: "no details"}", AppDebugLog.LogLevel.VERBOSE)
         }
         // Titles the catalog has no details for (not sold in this marketplace) are left out
         val books = sequences.mapNotNull { (asin, sequence) ->
@@ -190,62 +191,21 @@ class SeriesRepository @Inject constructor(
     }
 
     /**
-     * Logs series whose stored list leaves out an owned copy or repeats a title,
-     * the cases that show a book twice.
+     * Logs owned copies missing from their series' stored list (they show as an extra row),
+     * and how many titles Audible lists more than once (merged into one row on screen).
      */
     private suspend fun logDuplicates(library: List<AudibleBookEntity>) {
         val stored = seriesDao.getAllBooksOnce().groupBy { it.seriesAsin }
+        var repeated = 0
         library.filter { it.seriesAsin != null }.groupBy { it.seriesAsin!! }.forEach { (seriesAsin, owned) ->
             val listed = stored[seriesAsin] ?: return@forEach
             val listedAsins = listed.map { it.asin }.toSet()
-            val notListed = owned.filter { it.asin !in listedAsins }
-            val repeats = listed.groupBy { SeriesIndex.normalize(it.title) + "|" + it.sequence }.values.filter { it.size > 1 }
-            if (notListed.isEmpty() && repeats.isEmpty()) return@forEach
-            debugLog.log("SERIES", "$seriesAsin ${owned.first().seriesTitle}: ${listed.size} listed, owned ${owned.joinToString { "${it.asin} #${it.seriesSequence}" }}")
-            notListed.forEach { book ->
-                val sameTitle = listed.filter { SeriesIndex.normalize(it.title) == SeriesIndex.normalize(book.title) }
-                debugLog.log("SERIES", "  owned ${book.asin} ${book.title} #${book.seriesSequence} not in list; listed with that title: ${sameTitle.joinToString { "${it.asin} #${it.sequence}" }.ifEmpty { "none" }}")
-            }
-            repeats.forEach { books ->
-                debugLog.log("SERIES", "  listed twice: ${books.first().title} #${books.first().sequence} as ${books.joinToString { it.asin }}")
+            repeated += listed.groupBy { SeriesIndex.normalize(it.title) + "|" + it.sequence }.values.count { it.size > 1 }
+            owned.filter { it.asin !in listedAsins }.forEach { book ->
+                debugLog.log("SERIES", "$seriesAsin ${book.seriesTitle}: owned ${book.asin} ${book.title} #${book.seriesSequence} not in its list")
             }
         }
-    }
-
-    /**
-     * Searches the catalog for the book, owned or not. Null when Audible couldn't be reached.
-     * Searches by title first, then by keywords, since a file's title is often the
-     * book's subtitle on Audible ("Fated Antagonist" for "Chrysalis 7").
-     */
-    private suspend fun lookUp(key: String, title: String, author: String?): SeriesLookupEntity? {
-        val knownAuthor = author?.takeUnless { it.isBlank() || it.startsWith("Unknown") }
-        val byTitle = mutableMapOf("title" to title)
-        knownAuthor?.let { byTitle["author"] = it }
-        val byKeywords = mapOf("keywords" to listOfNotNull(title, knownAuthor).joinToString(" "))
-
-        var match: JsonObject? = null
-        for (query in listOf(byTitle, byKeywords)) {
-            val result = apiClient.getCatalog("products", query + mapOf(
-                "num_results" to "10",
-                "products_sort_by" to "Relevance",
-                "response_groups" to "series,contributors,product_attrs"
-            ))
-            val data = result.data ?: run {
-                debugLog.log("SERIES", "Lookup failed for $title: ${result.error}")
-                return null
-            }
-            match = bestMatch(data["products"].arr().mapNotNull { it.obj() }, title)
-            if (match != null) break
-        }
-        val series = match?.get("series").arr().firstOrNull().obj()
-        debugLog.log("SERIES", "Lookup $title: ${match?.let { "${it["asin"].str()} ${it["title"].str()} / ${series?.get("title").str() ?: "no series"}" } ?: "no match"}")
-        return SeriesLookupEntity(
-            key = key,
-            asin = match?.get("asin").str(),
-            seriesAsin = series?.get("asin").str(),
-            seriesTitle = series?.get("title").str(),
-            sequence = series?.get("sequence").str()
-        )
+        if (repeated > 0) debugLog.log("SERIES", "$repeated titles are listed under more than one ASIN")
     }
 
     /** Finds the book in the catalog by ASIN. Null when Audible couldn't be reached. */
