@@ -152,6 +152,8 @@ class MainViewModel @Inject constructor(
                 val bookEntity = metadataExtractor.toBookEntity(uri, metadata)
                 val chapters = metadataExtractor.toChapterEntities(0, metadata)
                 bookRepository.insertBook(bookEntity, chapters)
+                // Find its series on Audible now rather than at the next library sync
+                seriesRepository.refresh()
             } catch (e: Exception) {
                 _importError.value = "Failed to import: ${e.message}"
             }

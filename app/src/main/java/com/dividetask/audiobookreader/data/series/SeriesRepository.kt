@@ -93,7 +93,8 @@ class SeriesRepository @Inject constructor(
             val key = SeriesIndex.lookupKey(title, author)
             val previous = known[key]
             // A match is kept; a miss is tried again after a week in case the catalog changed
-            if (previous != null && (previous.asin != null || now - previous.checkedAt < MISS_RETRY_MS)) continue
+            if (previous != null && (previous.asin != null ||
+                    (now - previous.checkedAt < MISS_RETRY_MS && previous.checkedAt > MATCHING_CHANGED_AT))) continue
             lookUp(key, title, author)?.let {
                 seriesDao.insertLookup(it)
                 lookedUp++
@@ -189,30 +190,33 @@ class SeriesRepository @Inject constructor(
         }
     }
 
-    /** Searches the catalog for the book. Null when Audible couldn't be reached. */
+    /**
+     * Searches the catalog for the book, owned or not. Null when Audible couldn't be reached.
+     * Searches by title first, then by keywords, since a file's title is often the
+     * book's subtitle on Audible ("Fated Antagonist" for "Chrysalis 7").
+     */
     private suspend fun lookUp(key: String, title: String, author: String?): SeriesLookupEntity? {
-        val params = mutableMapOf(
-            "title" to title,
-            "num_results" to "10",
-            "products_sort_by" to "Relevance",
-            "response_groups" to "series,contributors,product_attrs"
-        )
-        author?.takeUnless { it.isBlank() || it.startsWith("Unknown") }?.let { params["author"] = it }
-        val result = apiClient.getCatalog("products", params)
-        val data = result.data ?: run {
-            debugLog.log("SERIES", "Lookup failed for $title: ${result.error}")
-            return null
-        }
-        val products = data["products"].arr().mapNotNull { it.obj() }
-        val wanted = SeriesIndex.normalize(title)
-        val match = products.firstOrNull { SeriesIndex.normalize(it["title"].str().orEmpty()) == wanted }
-            ?: products.firstOrNull {
-                val t = SeriesIndex.normalize(it["title"].str().orEmpty())
-                // Prefix matches only for longer titles, so "It" doesn't match "It Ends with Us"
-                t.length >= 8 && wanted.length >= 8 && (t.startsWith(wanted) || wanted.startsWith(t))
+        val knownAuthor = author?.takeUnless { it.isBlank() || it.startsWith("Unknown") }
+        val byTitle = mutableMapOf("title" to title)
+        knownAuthor?.let { byTitle["author"] = it }
+        val byKeywords = mapOf("keywords" to listOfNotNull(title, knownAuthor).joinToString(" "))
+
+        var match: JsonObject? = null
+        for (query in listOf(byTitle, byKeywords)) {
+            val result = apiClient.getCatalog("products", query + mapOf(
+                "num_results" to "10",
+                "products_sort_by" to "Relevance",
+                "response_groups" to "series,contributors,product_attrs"
+            ))
+            val data = result.data ?: run {
+                debugLog.log("SERIES", "Lookup failed for $title: ${result.error}")
+                return null
             }
+            match = bestMatch(data["products"].arr().mapNotNull { it.obj() }, title)
+            if (match != null) break
+        }
         val series = match?.get("series").arr().firstOrNull().obj()
-        debugLog.log("SERIES", "Lookup $title: ${match?.let { "${it["asin"].str()} / ${series?.get("title").str() ?: "no series"}" } ?: "no match"}")
+        debugLog.log("SERIES", "Lookup $title: ${match?.let { "${it["asin"].str()} ${it["title"].str()} / ${series?.get("title").str() ?: "no series"}" } ?: "no match"}")
         return SeriesLookupEntity(
             key = key,
             asin = match?.get("asin").str(),
@@ -220,6 +224,23 @@ class SeriesRepository @Inject constructor(
             seriesTitle = series?.get("title").str(),
             sequence = series?.get("sequence").str()
         )
+    }
+
+    /** The product whose title, subtitle or "title: subtitle" is the wanted title. */
+    private fun bestMatch(products: List<JsonObject>, title: String): JsonObject? {
+        val wanted = SeriesIndex.normalize(title)
+        fun names(p: JsonObject): List<String> {
+            val t = p["title"].str().orEmpty()
+            val sub = p["subtitle"].str()
+            return listOfNotNull(t, sub, sub?.let { "$t: $it" }).map(SeriesIndex::normalize).filter { it.isNotEmpty() }
+        }
+        return products.firstOrNull { p -> names(p).any { it == wanted } }
+            ?: products.firstOrNull { p ->
+                names(p).any { t ->
+                    // Prefix matches only for longer titles, so "It" doesn't match "It Ends with Us"
+                    t.length >= 8 && wanted.length >= 8 && (t.startsWith(wanted) || wanted.startsWith(t))
+                }
+            }
     }
 
     private fun JsonElement?.obj(): JsonObject? = this as? JsonObject
@@ -231,5 +252,7 @@ class SeriesRepository @Inject constructor(
         // Long or bulky product fields left out of the relationship log
         val LOG_SKIP_FIELDS = setOf("product_images", "publisher_summary", "merchandising_summary")
         const val MISS_RETRY_MS = 7 * 24 * 60 * 60 * 1000L
+        // Misses from before subtitles and keywords were searched (2026-10-30) are tried again
+        const val MATCHING_CHANGED_AT = 1_793_383_200_000L
     }
 }
