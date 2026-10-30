@@ -4,6 +4,7 @@ import com.dividetask.audiobookreader.audible.api.AudibleApiClient
 import com.dividetask.audiobookreader.audible.auth.AudibleTokenStore
 import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.data.db.dao.SeriesDao
+import com.dividetask.audiobookreader.data.db.entity.AudibleBookEntity
 import com.dividetask.audiobookreader.data.db.entity.SeriesBookEntity
 import com.dividetask.audiobookreader.data.db.entity.SeriesEntity
 import com.dividetask.audiobookreader.data.db.entity.SeriesLookupEntity
@@ -71,6 +72,7 @@ class SeriesRepository @Inject constructor(
         val now = System.currentTimeMillis()
         val library = audibleBookDao.getAllOnce()
         val index = SeriesIndex(library)
+        logDuplicates(library)
 
         // Books that aren't in the Audible library: find them in the catalog
         val known = seriesDao.getAllLookupsOnce().associateBy { it.key }
@@ -142,6 +144,11 @@ class SeriesRepository @Inject constructor(
                 o["asin"].str()?.let { info[it] = o }
             }
         }
+        // Every relationship as Audible sent it, to find what marks the titles its app hides
+        product["relationships"].arr().mapNotNull { it.obj() }.forEach { rel ->
+            val details = rel["asin"].str()?.let { info[it] }?.let { JsonObject(it - LOG_SKIP_FIELDS) }
+            debugLog.log("SERIES", "$seriesAsin relationship $rel -> ${details ?: "no details"}")
+        }
         // Titles the catalog has no details for (not sold in this marketplace) are left out
         val books = sequences.mapNotNull { (asin, sequence) ->
             val p = info[asin] ?: return@mapNotNull null
@@ -157,6 +164,29 @@ class SeriesRepository @Inject constructor(
         val title = product["title"].str() ?: fallbackTitle ?: seriesAsin
         seriesDao.replaceSeries(SeriesEntity(seriesAsin, title), books)
         return true
+    }
+
+    /**
+     * Logs series whose stored list leaves out an owned copy or repeats a title,
+     * the cases that show a book twice.
+     */
+    private suspend fun logDuplicates(library: List<AudibleBookEntity>) {
+        val stored = seriesDao.getAllBooksOnce().groupBy { it.seriesAsin }
+        library.filter { it.seriesAsin != null }.groupBy { it.seriesAsin!! }.forEach { (seriesAsin, owned) ->
+            val listed = stored[seriesAsin] ?: return@forEach
+            val listedAsins = listed.map { it.asin }.toSet()
+            val notListed = owned.filter { it.asin !in listedAsins }
+            val repeats = listed.groupBy { SeriesIndex.normalize(it.title) + "|" + it.sequence }.values.filter { it.size > 1 }
+            if (notListed.isEmpty() && repeats.isEmpty()) return@forEach
+            debugLog.log("SERIES", "$seriesAsin ${owned.first().seriesTitle}: ${listed.size} listed, owned ${owned.joinToString { "${it.asin} #${it.seriesSequence}" }}")
+            notListed.forEach { book ->
+                val sameTitle = listed.filter { SeriesIndex.normalize(it.title) == SeriesIndex.normalize(book.title) }
+                debugLog.log("SERIES", "  owned ${book.asin} ${book.title} #${book.seriesSequence} not in list; listed with that title: ${sameTitle.joinToString { "${it.asin} #${it.sequence}" }.ifEmpty { "none" }}")
+            }
+            repeats.forEach { books ->
+                debugLog.log("SERIES", "  listed twice: ${books.first().title} #${books.first().sequence} as ${books.joinToString { it.asin }}")
+            }
+        }
     }
 
     /** Searches the catalog for the book. Null when Audible couldn't be reached. */
@@ -198,6 +228,8 @@ class SeriesRepository @Inject constructor(
 
     private companion object {
         const val SERIES_REFRESH_MS = 24 * 60 * 60 * 1000L
+        // Long or bulky product fields left out of the relationship log
+        val LOG_SKIP_FIELDS = setOf("product_images", "publisher_summary", "merchandising_summary")
         const val MISS_RETRY_MS = 7 * 24 * 60 * 60 * 1000L
     }
 }
