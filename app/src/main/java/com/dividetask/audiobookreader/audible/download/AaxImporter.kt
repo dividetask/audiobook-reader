@@ -105,7 +105,8 @@ class AaxImporter @Inject constructor(
      * Imports a book split into several audio files (e.g. one MP3 per chapter): copies them
      * in file-name order, joins them into one AAC .m4b with a chapter per file, and takes
      * the title, author and cover from the files. Playlists, text and other non-audio files
-     * among [files] (uri to file name) are skipped; an image among them is used as the cover.
+     * among [files] (uri to file name) are skipped; an image among them is the cover when
+     * the files have none.
      */
     fun importJoined(files: List<Pair<Uri, String>>) {
         scope.launch { mutex.withLock { runJoin(files) } }
@@ -240,20 +241,19 @@ class AaxImporter @Inject constructor(
         }
     }
 
-    /** Saves the picked image, else the first file's embedded picture, as the book's cover. */
-    private fun saveCover(baseName: String, image: Uri?, firstAudio: Uri?): String? {
-        val bytes = image?.let { context.contentResolver.openInputStream(it)?.use { s -> s.readBytes() } }
-            ?: firstAudio?.let { uri ->
-                val retriever = android.media.MediaMetadataRetriever()
-                try {
-                    retriever.setDataSource(context, uri)
-                    retriever.embeddedPicture
-                } catch (e: Exception) {
-                    null
-                } finally {
-                    retriever.release()
-                }
-            }
+    /** Saves the first file's embedded picture, else the picked image, as the book's cover. */
+    private fun saveCover(baseName: String, image: Uri?, firstAudio: Uri): String? {
+        val retriever = android.media.MediaMetadataRetriever()
+        val embedded = try {
+            retriever.setDataSource(context, firstAudio)
+            retriever.embeddedPicture
+        } catch (e: Exception) {
+            null
+        } finally {
+            retriever.release()
+        }
+        val bytes = embedded
+            ?: image?.let { context.contentResolver.openInputStream(it)?.use { s -> s.readBytes() } }
             ?: return null
         val file = File(File(context.filesDir, "covers").apply { mkdirs() }, "$baseName.jpg")
         file.writeBytes(bytes)

@@ -60,6 +60,19 @@ class MetadataExtractor @Inject constructor(
         }
     }
 
+    /** The file's album tag, which names the book when it's split into several files. */
+    fun readAlbum(uri: Uri): String? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, uri)
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            null
+        } finally {
+            retriever.release()
+        }
+    }
+
     /**
      * The Audible ASIN in the file's tags, if it has one. Tools that save Audible books
      * write it under keys like "ASIN", "AUDIBLE_ASIN" or "CDEK".

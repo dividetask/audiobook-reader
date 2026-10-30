@@ -131,19 +131,42 @@ class MainViewModel @Inject constructor(
 
     fun clearAaxImportStatus() = aaxImporter.clearStatus()
 
-    /** One file is a book; several are the parts of one book, joined into a single file. */
+    /**
+     * Picked files can be several books, some split into parts (e.g. one file per chapter).
+     * Audio files with the same album tag are one book; files with no album tag are grouped
+     * by folder. A book of several files is joined into one; .aax files are each their own
+     * book. An image is used as the cover of the books in its folder.
+     */
     fun importLocalBooks(uris: List<Uri>) {
+        // A single file is a book whatever its name says
+        if (uris.size == 1) return importLocalBook(uris[0])
         viewModelScope.launch(Dispatchers.IO) {
-            val files = uris.map { it to displayName(it) }
-            val audio = files.filter { (_, name) -> AUDIO_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) } }
-            when {
-                files.size == 1 -> importLocalBook(uris[0])
-                files.any { it.second.endsWith(".aax", ignoreCase = true) } ->
-                    _importError.value = "Add .aax files one at a time"
-                audio.size == 1 -> importLocalBook(audio[0].first)
-                else -> aaxImporter.importJoined(files)
+            val files = uris.map { PickedFile(it, displayName(it), folderOf(it)) }
+            fun isType(f: PickedFile, exts: List<String>) = exts.any { f.name.endsWith(".$it", ignoreCase = true) }
+            val images = files.filter { isType(it, IMAGE_EXTENSIONS) }
+            files.filter { it.name.endsWith(".aax", ignoreCase = true) }.forEach { importLocalBook(it.uri) }
+            val books = files.filter { isType(it, AUDIO_EXTENSIONS) }.groupBy { f ->
+                metadataExtractor.readAlbum(f.uri)?.let { "album:" + SeriesIndex.normalize(it) } ?: "folder:${f.folder}"
+            }.values
+            debugLog.log("IMPORT", "Picked ${files.size} files: ${books.size} book(s) of ${books.joinToString { it.size.toString() }} file(s)")
+            for (parts in books) {
+                if (parts.size == 1) {
+                    importLocalBook(parts[0].uri)
+                } else {
+                    val cover = images.filter { it.folder == parts[0].folder }
+                    aaxImporter.importJoined((parts + cover).map { it.uri to it.name })
+                }
             }
         }
+    }
+
+    private class PickedFile(val uri: Uri, val name: String, val folder: String)
+
+    /** The folder a picked file is in, from its document ID (e.g. "728D-3099:Books/One/01.mp3"). */
+    private fun folderOf(uri: Uri): String = try {
+        android.provider.DocumentsContract.getDocumentId(uri).substringBeforeLast('/', "")
+    } catch (e: Exception) {
+        ""
     }
 
     fun importLocalBook(uri: Uri) {
@@ -441,5 +464,6 @@ class MainViewModel @Inject constructor(
 
     private companion object {
         val AUDIO_EXTENSIONS = listOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "wma")
+        val IMAGE_EXTENSIONS = listOf("jpg", "jpeg", "png")
     }
 }
