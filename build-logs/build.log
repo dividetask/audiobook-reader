@@ -47,8 +47,8 @@ w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask
 > Task :app:hiltAggregateDepsDebug UP-TO-DATE
 > Task :app:hiltJavaCompileDebug
 > Task :app:processDebugJavaRes UP-TO-DATE
-> Task :app:transformDebugClassesWithAsm
 > Task :app:mergeDebugJavaResource UP-TO-DATE
+> Task :app:transformDebugClassesWithAsm
 > Task :app:mergeDebugGeneratedProguardFiles UP-TO-DATE
 > Task :app:minifyDebugWithR8
 > Task :app:shrinkDebugRes
