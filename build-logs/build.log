@@ -12,13 +12,13 @@ All code optimizations and obfuscation are disabled for debuggable builds.
 > Task :app:generateDebugBuildConfig
 > Task :app:checkDebugAarMetadata UP-TO-DATE
 > Task :app:generateDebugResValues UP-TO-DATE
-> Task :app:mapDebugSourceSetPaths
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
 > Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
 > Task :app:packageDebugResources UP-TO-DATE
 > Task :app:parseDebugLocalResources UP-TO-DATE
 > Task :app:createDebugCompatibleScreenManifests
 > Task :app:extractDeepLinksDebug UP-TO-DATE
-> Task :app:mergeDebugResources
 > Task :app:processDebugMainManifest
 > Task :app:processDebugManifest
 > Task :app:javaPreCompileDebug UP-TO-DATE
@@ -44,12 +44,12 @@ All code optimizations and obfuscation are disabled for debuggable builds.
 w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/common/SeriesList.kt:161:40 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
 
 > Task :app:compileDebugJavaWithJavac
-> Task :app:hiltAggregateDepsDebug
+> Task :app:hiltAggregateDepsDebug UP-TO-DATE
 > Task :app:hiltJavaCompileDebug
-> Task :app:processDebugJavaRes
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:mergeDebugJavaResource UP-TO-DATE
 > Task :app:transformDebugClassesWithAsm
-> Task :app:mergeDebugGeneratedProguardFiles
-> Task :app:mergeDebugJavaResource
+> Task :app:mergeDebugGeneratedProguardFiles UP-TO-DATE
 > Task :app:minifyDebugWithR8
 > Task :app:shrinkDebugRes
 > Task :app:convertShrunkResourcesToBinaryDebug
@@ -57,5 +57,5 @@ w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 46s
-41 actionable tasks: 23 executed, 18 up-to-date
+BUILD SUCCESSFUL in 52s
+41 actionable tasks: 17 executed, 24 up-to-date
