@@ -40,25 +40,22 @@ All code optimizations and obfuscation are disabled for debuggable builds.
 > Task :app:convertLinkedResourcesToProtoDebug
 > Task :app:kspDebugKotlin
 
-> Task :app:compileDebugKotlin FAILED
-e: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/data/series/SeriesRepository.kt:120:13 Unresolved reference 'lookUp'.
-e: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/data/series/SeriesRepository.kt:120:41 Cannot infer type for this parameter. Please specify it explicitly.
-e: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/data/series/SeriesRepository.kt:120:45 Cannot infer type for this parameter. Please specify it explicitly.
+> Task :app:compileDebugKotlin
+w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/common/SeriesList.kt:173:40 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
 
-FAILURE: Build failed with an exception.
+> Task :app:compileDebugJavaWithJavac
+> Task :app:hiltAggregateDepsDebug UP-TO-DATE
+> Task :app:hiltJavaCompileDebug
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:mergeDebugJavaResource UP-TO-DATE
+> Task :app:transformDebugClassesWithAsm
+> Task :app:mergeDebugGeneratedProguardFiles UP-TO-DATE
+> Task :app:minifyDebugWithR8
+> Task :app:shrinkDebugRes
+> Task :app:convertShrunkResourcesToBinaryDebug
+> Task :app:packageDebug
+> Task :app:createDebugApkListingFileRedirect
+> Task :app:assembleDebug
 
-* What went wrong:
-Execution failed for task ':app:compileDebugKotlin'.
-> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.GradleCompilerRunnerWithWorkers$GradleKotlinCompilerWorkAction
-   > Compilation error. See log for more details
-
-* Try:
-> Run with --stacktrace option to get the stack trace.
-> Run with --info or --debug option to get more log output.
-> Run with --scan to get full insights.
-> Get more help at https://help.gradle.org.
-
-BUILD FAILED in 17s
-29 actionable tasks: 9 executed, 20 up-to-date
-BUILD FAILED (exit 1) — no new APK. See the Gradle output above;
-re-run with --stacktrace or --info (append to TASK) for more detail.
+BUILD SUCCESSFUL in 49s
+41 actionable tasks: 17 executed, 24 up-to-date
