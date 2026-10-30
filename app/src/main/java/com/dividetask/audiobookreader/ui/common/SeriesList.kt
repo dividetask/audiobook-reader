@@ -82,7 +82,7 @@ fun <T> groupBySeries(
             }
             // Books on the tab that the catalog's list doesn't include
             val extra = remaining.map { (item, ref) -> SeriesMember(ref.asin, titleOf(item), ref.sequence, coverOf(item), item) }
-            val members = (listed + extra).sortedWith(
+            val members = dropRepeats(listed + extra, index).sortedWith(
                 compareBy<SeriesMember<T>, Double?>(nullsLast<Double>()) { SeriesIndex.sequenceNumber(it.sequence) }
                     .thenBy(String.CASE_INSENSITIVE_ORDER) { it.title }
             )
@@ -109,6 +109,18 @@ fun <T> groupBySeries(
     }
     return (singles + groups).sortedWith(Comparator<BookListEntry<T>> { a, b -> order.compare(lead(a), lead(b)) }.then(byName))
 }
+
+/**
+ * Audible lists most books in a series several times under different ASINs (other
+ * editions, other marketplaces), all with the same title and number. Keeps one row per
+ * book: the copies on this tab, else the one in the Audible library, else Audible's first.
+ */
+private fun <T> dropRepeats(members: List<SeriesMember<T>>, index: SeriesIndex): List<SeriesMember<T>> =
+    members.groupBy { SeriesIndex.normalize(it.title) + "|" + it.sequence.orEmpty() }.values.flatMap { same ->
+        same.filter { it.item != null }.ifEmpty {
+            listOf(same.firstOrNull { m -> m.asin?.let { it in index.libraryByAsin } == true } ?: same.first())
+        }
+    }
 
 /**
  * Adds [entries] to the list. A series is one row that expands, when tapped, into its
