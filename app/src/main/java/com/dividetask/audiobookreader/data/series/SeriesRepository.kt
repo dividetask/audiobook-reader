@@ -1,6 +1,7 @@
 package com.dividetask.audiobookreader.data.series
 
 import com.dividetask.audiobookreader.audible.api.AudibleApiClient
+import com.dividetask.audiobookreader.audible.api.ApiResult
 import com.dividetask.audiobookreader.audible.auth.AudibleTokenStore
 import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.data.db.dao.SeriesDao
@@ -17,6 +18,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
@@ -89,34 +91,45 @@ class SeriesRepository @Inject constructor(
         // Books that aren't in the Audible library: find them in the catalog,
         // by the ASIN in their tags first, else by title
         val known = seriesDao.getAllLookupsOnce().associateBy { it.key }.toMutableMap()
-        fun isDue(previous: SeriesLookupEntity?) = previous == null || (previous.asin == null &&
-            (now - previous.checkedAt >= MISS_RETRY_MS || previous.checkedAt <= MATCHING_CHANGED_AT))
+        // A result is kept unless it found no series: that is tried again weekly, and at
+        // once for a book (re)added since it was saved
+        fun isDue(previous: SeriesLookupEntity?, addedAt: Long = 0L) = previous == null || previous.checkedAt < addedAt ||
+            (previous.seriesAsin == null && (now - previous.checkedAt >= MISS_RETRY_MS || previous.checkedAt <= MATCHING_CHANGED_AT))
         val notInLibrary = localBooks.filter { book ->
             listOfNotNull(SeriesIndex.asinFromFileUri(book.fileUri), book.asin).none { it in index.libraryByAsin } &&
                 index.matchLibrary(book.title, book.author) == null
         }
         var lookedUp = 0
-        for (asin in notInLibrary.mapNotNull { it.asin?.takeIf(String::isNotEmpty) }.distinct()) {
+        for (book in notInLibrary.filter { !it.asin.isNullOrEmpty() }.distinctBy { it.asin }) {
+            val asin = book.asin ?: continue
             val key = SeriesIndex.asinKey(asin)
-            if (!isDue(known[key])) continue
+            if (!isDue(known[key], book.dateAdded)) continue
             lookUpAsin(key, asin)?.let {
                 seriesDao.insertLookup(it)
                 known[key] = it
                 lookedUp++
             }
         }
+        // Title, author, and when it was added (0 for server files)
         val unmatched = buildList {
             notInLibrary
                 .filter { book -> book.asin.isNullOrEmpty() || known[SeriesIndex.asinKey(book.asin)]?.seriesAsin == null }
-                .forEach { add(it.title to it.author) }
+                .forEach { add(Triple(it.title, it.author, it.dateAdded)) }
             remoteLibrary.files.value
                 .filter { index.matchLibrary(it.title, it.folder) == null }
-                .forEach { add(it.title to it.folder.ifEmpty { null }) }
+                .forEach { add(Triple(it.title, it.folder.ifEmpty { null }, 0L)) }
         }.distinctBy { (title, author) -> SeriesIndex.lookupKey(title, author) }
 
-        for ((title, author) in unmatched) {
+        for ((title, author, addedAt) in unmatched) {
             val key = SeriesIndex.lookupKey(title, author)
-            if (!isDue(known[key])) continue
+            val previous = known[key]
+            if (!isDue(previous, addedAt)) {
+                // A local book still without a series: say what the saved result was
+                if (addedAt > 0 && previous?.seriesAsin == null) {
+                    debugLog.log("SERIES", "Lookup $title by $author: saved ${previous?.asin ?: "no match"} (no series) from ${java.text.SimpleDateFormat("MMM d HH:mm", java.util.Locale.US).format(java.util.Date(previous?.checkedAt ?: 0))}")
+                }
+                continue
+            }
             lookUp(key, title, author)?.let {
                 seriesDao.insertLookup(it)
                 lookedUp++
@@ -137,7 +150,7 @@ class SeriesRepository @Inject constructor(
 
     /** Stores every title in the series. False when Audible couldn't be reached. */
     private suspend fun fetchSeries(seriesAsin: String, fallbackTitle: String?): Boolean {
-        val result = apiClient.getCatalog(
+        val result = catalog(
             "products/$seriesAsin",
             mapOf("response_groups" to "relationships,product_attrs")
         )
@@ -153,7 +166,7 @@ class SeriesRepository @Inject constructor(
 
         val info = mutableMapOf<String, JsonObject>()
         for (chunk in sequences.map { it.first }.chunked(50)) {
-            val page = apiClient.getCatalog(
+            val page = catalog(
                 "products",
                 mapOf(
                     "asins" to chunk.joinToString(","),
@@ -221,7 +234,7 @@ class SeriesRepository @Inject constructor(
 
         var match: JsonObject? = null
         for (query in listOf(byTitle, byKeywords)) {
-            val result = apiClient.getCatalog("products", query + mapOf(
+            val result = catalog("products", query + mapOf(
                 "num_results" to "10",
                 "products_sort_by" to "Relevance",
                 "response_groups" to "series,contributors,product_attrs"
@@ -246,7 +259,7 @@ class SeriesRepository @Inject constructor(
 
     /** Finds the book in the catalog by ASIN. Null when Audible couldn't be reached. */
     private suspend fun lookUpAsin(key: String, asin: String): SeriesLookupEntity? {
-        val result = apiClient.getCatalog("products/$asin", mapOf("response_groups" to "series,product_attrs"))
+        val result = catalog("products/$asin", mapOf("response_groups" to "series,product_attrs"))
         if (result.data == null && result.error?.contains("404") != true) {
             debugLog.log("SERIES", "Lookup failed for $asin: ${result.error}")
             return null
@@ -280,12 +293,26 @@ class SeriesRepository @Inject constructor(
             }
     }
 
+    private var lastCatalogAt = 0L
+
+    /**
+     * A catalog request, at least [CATALOG_SPACING_MS] after the previous one: a full sync
+     * makes ~150 of them, and bursts may count toward Audible's download limit.
+     */
+    private suspend fun catalog(path: String, params: Map<String, String>): ApiResult<JsonObject> {
+        val wait = lastCatalogAt + CATALOG_SPACING_MS - System.currentTimeMillis()
+        if (wait > 0) delay(wait)
+        lastCatalogAt = System.currentTimeMillis()
+        return apiClient.getCatalog(path, params)
+    }
+
     private fun JsonElement?.obj(): JsonObject? = this as? JsonObject
     private fun JsonElement?.arr(): List<JsonElement> = (this as? JsonArray) ?: emptyList()
     private fun JsonElement?.str(): String? = (this as? JsonPrimitive)?.takeUnless { it is JsonNull }?.content
 
     private companion object {
         const val SERIES_REFRESH_MS = 24 * 60 * 60 * 1000L
+        const val CATALOG_SPACING_MS = 1_000L
         // Long or bulky product fields left out of the relationship log
         val LOG_SKIP_FIELDS = setOf("product_images", "publisher_summary", "merchandising_summary")
         const val MISS_RETRY_MS = 7 * 24 * 60 * 60 * 1000L
