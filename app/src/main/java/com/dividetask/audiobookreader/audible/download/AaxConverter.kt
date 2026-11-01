@@ -101,11 +101,25 @@ class AaxConverter @Inject constructor(
         return null
     }
 
-    /** Joins already-converted parts of one book into [outFile] without re-encoding. */
-    fun concat(parts: List<File>, outFile: File, durationMs: Long?, onProgress: ((Float) -> Unit)? = null): Boolean {
+    /**
+     * Joins already-converted parts of one book into [outFile] without re-encoding.
+     * [keep] optionally gives, per part, the stretch to keep in ms (start to end), so
+     * Audible's announcements between parts can be left out.
+     */
+    fun concat(
+        parts: List<File>,
+        outFile: File,
+        durationMs: Long?,
+        keep: List<LongRange>? = null,
+        onProgress: ((Float) -> Unit)? = null
+    ): Boolean {
         debugLog.section("Join ${parts.size} parts: ${outFile.name}")
         val list = File(outFile.parentFile, "concat.txt")
-        list.writeText(parts.joinToString("\n") { "file '${it.absolutePath.replace("'", "'\\''")}'" })
+        list.writeText(parts.withIndex().joinToString("\n") { (i, part) ->
+            val entry = "file '${part.absolutePath.replace("'", "'\\''")}'"
+            val range = keep?.getOrNull(i) ?: return@joinToString entry
+            entry + "\ninpoint ${range.first / 1000.0}\noutpoint ${range.last / 1000.0}"
+        })
         // Chapters come from each part and are stored in the database instead
         val cmd = "-y -f concat -safe 0 -i \"${list.absolutePath}\" -map 0:a -map_chapters -1 -c copy -f mp4 \"${outFile.absolutePath}\""
         return try {

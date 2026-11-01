@@ -255,7 +255,11 @@ class AudibleApiClient @Inject constructor(
      * Fetches the chapter list for [asin]. Returns null data on failure (network/auth),
      * or an empty list when Audible has no chapters for the title.
      */
-    suspend fun getChapters(asin: String): ApiResult<List<AudibleChapter>> {
+    suspend fun getChapters(asin: String): ApiResult<List<AudibleChapter>> =
+        getChapterInfo(asin).let { ApiResult(it.data?.let { info -> flattenChapters(info.chapters) }, it.debugLog, it.error) }
+
+    /** The chapter list for [asin] as Audible sends it, with its brand intro and outro lengths. */
+    suspend fun getChapterInfo(asin: String): ApiResult<AudibleChapterInfo> {
         val log = mutableListOf<String>()
         val locale = AudibleEndpoints.getLocale(tokenStore.locale)
         val url = AudibleEndpoints.contentMetadataUrl(locale, asin)
@@ -291,9 +295,9 @@ class AudibleApiClient @Inject constructor(
                 log.add("Response: ${responseText.take(300)}")
                 return ApiResult(null, log)
             }
-            val chapters = json.decodeFromString<AudibleChapterResponse>(responseText)
-                .contentMetadata?.chapterInfo?.chapters.orEmpty()
-            ApiResult(flattenChapters(chapters), log)
+            val info = json.decodeFromString<AudibleChapterResponse>(responseText)
+                .contentMetadata?.chapterInfo ?: AudibleChapterInfo()
+            ApiResult(info, log)
         } catch (e: Exception) {
             log.add("EXCEPTION: ${e::class.simpleName}: ${e.message}")
             Log.e("AudibleApi", "Chapter fetch failed for $asin", e)
@@ -337,7 +341,7 @@ class AudibleApiClient @Inject constructor(
         }
     }
 
-    private fun flattenChapters(chapters: List<AudibleChapter>): List<AudibleChapter> =
+    fun flattenChapters(chapters: List<AudibleChapter>): List<AudibleChapter> =
         chapters.flatMap { listOf(it.copy(chapters = null)) + flattenChapters(it.chapters.orEmpty()) }
 
     private fun decryptVoucher(asin: String, encryptedVoucher: String): String? {

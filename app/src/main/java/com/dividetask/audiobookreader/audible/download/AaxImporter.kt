@@ -50,7 +50,8 @@ class AaxImporter @Inject constructor(
     private val debugLog: AppDebugLog,
     private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog,
     private val metadataExtractor: com.dividetask.audiobookreader.data.metadata.MetadataExtractor,
-    private val seriesRepository: com.dividetask.audiobookreader.data.series.SeriesRepository
+    private val seriesRepository: com.dividetask.audiobookreader.data.series.SeriesRepository,
+    private val apiClient: com.dividetask.audiobookreader.audible.api.AudibleApiClient
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -95,7 +96,9 @@ class AaxImporter @Inject constructor(
                             ?.let { return@runImport Fetched(error = it) }
                         files += part
                     }
-                    Fetched(files)
+                    // Each part's link names its ASIN: /library/download?asin=B0CS52NYXV&codec=AAX
+                    val asins = urls.mapNotNull { Regex("[?&]asin=([A-Za-z0-9]{10})").find(it)?.groupValues?.get(1) }
+                    Fetched(files, asins = asins)
                 }
             }
         }
@@ -264,8 +267,8 @@ class AaxImporter @Inject constructor(
         if (_status.value?.finished == true) _status.value = null
     }
 
-    /** The .aax file(s) of one book, in order, or why they couldn't be fetched. */
-    private class Fetched(val files: List<File> = emptyList(), val error: String? = null)
+    /** The .aax file(s) of one book, in order (with each part's ASIN when known), or why they couldn't be fetched. */
+    private class Fetched(val files: List<File> = emptyList(), val error: String? = null, val asins: List<String> = emptyList())
 
     /**
      * [fetch] puts the book's .aax file(s) in the given folder, reporting steps and progress.
@@ -341,7 +344,11 @@ class AaxImporter @Inject constructor(
                 val total = converted.sumOf { durationMsOf(it) ?: 0L }
                 val out = File(importDir, "$baseName.${converted[0].extension}")
                 step("Joining ${converted.size} parts")
-                if (!converter.concat(converted, out, total) { progress("Joining ${converted.size} parts", it) }) {
+                // With the parts' ASINs, Audible's chapter data gives chapter names and
+                // where the announcements between parts are
+                val plan = fetched.asins.takeIf { it.size == converted.size }?.let { planParts(converted, it) }
+                if (plan != null) chapters = plan.chapters
+                if (!converter.concat(converted, out, total, plan?.keep) { progress("Joining ${converted.size} parts", it) }) {
                     return fail("Joining the parts failed — see the debug log")
                 }
                 converted.forEach { it.delete() }
@@ -373,6 +380,53 @@ class AaxImporter @Inject constructor(
         } catch (e: Exception) {
             fail("${e::class.simpleName}: ${e.message}")
         }
+    }
+
+    private class PartPlan(val keep: List<LongRange>, val chapters: List<ChapterEntity>)
+
+    /**
+     * Uses Audible's chapter data for each part: chapter names, and what to cut where the
+     * parts meet — the "This is Audible" intro of every part after the first, and whatever
+     * follows the last chapter (the "broken up into multiple pieces" notice and the brand
+     * outro) of every part before the last. Null when any part's data can't be had; the
+     * parts are then joined whole.
+     */
+    private suspend fun planParts(parts: List<File>, asins: List<String>): PartPlan? {
+        val keep = mutableListOf<LongRange>()
+        val chapters = mutableListOf<ChapterEntity>()
+        var offset = 0L
+        for ((i, part) in parts.withIndex()) {
+            val length = durationMsOf(part) ?: return null
+            val result = apiClient.getChapterInfo(asins[i])
+            val info = result.data ?: run {
+                debugLog.log("IMPORT", "No chapter data for part ${i + 1} (${asins[i]}): ${result.error ?: result.debugLog.lastOrNull()}")
+                return null
+            }
+            val contentEnd = info.chapters.maxOfOrNull { it.startOffsetMs + it.lengthMs }?.coerceAtMost(length) ?: length
+            val start = if (i > 0) info.brandIntroDurationMs.coerceIn(0, MAX_CUT_MS) else 0L
+            val end = if (i < parts.lastIndex) {
+                minOf(contentEnd, length - info.brandOutroDurationMs).coerceIn(length - MAX_CUT_MS, length)
+            } else {
+                length
+            }
+            debugLog.log("IMPORT", "Part ${i + 1} (${asins[i]}): ${length / 1000}s, chapters end at ${contentEnd / 1000}s, " +
+                "intro ${info.brandIntroDurationMs}ms, outro ${info.brandOutroDurationMs}ms; keeping ${start / 1000}–${end / 1000}s")
+            keep += start..end
+            for (c in apiClient.flattenChapters(info.chapters)) {
+                val s = maxOf(c.startOffsetMs, start)
+                val e = minOf(c.startOffsetMs + c.lengthMs, end)
+                if (e <= s) continue
+                chapters += ChapterEntity(
+                    bookId = 0,
+                    title = c.title.ifBlank { "Chapter ${chapters.size + 1}" },
+                    startPositionMs = offset + s - start,
+                    endPositionMs = offset + e - start,
+                    index = chapters.size
+                )
+            }
+            offset += end - start
+        }
+        return PartPlan(keep, chapters)
     }
 
     private fun durationMsOf(file: File): Long? = try {
@@ -547,5 +601,7 @@ class AaxImporter @Inject constructor(
     private companion object {
         val AUDIO_EXTENSIONS = setOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "wma")
         val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png")
+        // Never cut more than this from either end of a part, whatever Audible's data says
+        const val MAX_CUT_MS = 3 * 60_000L
     }
 }
