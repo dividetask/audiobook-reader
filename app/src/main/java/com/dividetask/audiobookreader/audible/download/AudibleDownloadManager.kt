@@ -65,7 +65,9 @@ class AudibleDownloadManager @Inject constructor(
     private val converter: AaxConverter,
     private val activationBytesProvider: ActivationBytesProvider,
     private val pendingStore: PendingDownloadStore,
-    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog
+    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog,
+    // Lazy: only read when retrying
+    private val aaxImporter: dagger.Lazy<AaxImporter>
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -618,6 +620,11 @@ class AudibleDownloadManager @Inject constructor(
             if (apiClient.isThrottled) {
                 debugLog.log("DL", "Still limited by Audible — trying the rest later")
                 break
+            }
+            // Already coming from the website: asking the API too would only use up a request
+            if (pending.asin == aaxImporter.get().websiteAsin.value) {
+                debugLog.log("DL", "Not retrying ${pending.title}: downloading from the website")
+                continue
             }
             if (i > 0) delay(kotlin.random.Random.nextLong(60_000, 180_000))
             val book = AudibleBook(

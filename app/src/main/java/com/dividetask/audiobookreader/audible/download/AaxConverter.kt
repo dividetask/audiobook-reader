@@ -114,11 +114,41 @@ class AaxConverter @Inject constructor(
         onProgress: ((Float) -> Unit)? = null
     ): Boolean {
         debugLog.section("Join ${parts.size} parts: ${outFile.name}")
+        return runConcat(parts, keep, null, outFile, durationMs, onProgress)
+    }
+
+    /**
+     * Decrypts the .aax parts of one book and joins them into [outFile] in one pass, without
+     * writing each part out first. [keep] is as for [concat]. False if it fails — FFmpeg
+     * builds without per-file options for concat can't do this; convert and join instead.
+     */
+    fun decryptJoin(
+        parts: List<File>,
+        activationBytes: String,
+        outFile: File,
+        durationMs: Long?,
+        keep: List<LongRange>? = null,
+        onProgress: ((Float) -> Unit)? = null
+    ): Boolean {
+        debugLog.section("Decrypt and join ${parts.size} parts: ${outFile.name}")
+        return runConcat(parts, keep, "option activation_bytes $activationBytes", outFile, durationMs, onProgress)
+    }
+
+    /** Runs FFmpeg's concat demuxer over [parts], with [fileOption] (a concat directive) for each file. */
+    private fun runConcat(
+        parts: List<File>,
+        keep: List<LongRange>?,
+        fileOption: String?,
+        outFile: File,
+        durationMs: Long?,
+        onProgress: ((Float) -> Unit)?
+    ): Boolean {
         val list = File(outFile.parentFile, "concat.txt")
         list.writeText(parts.withIndex().joinToString("\n") { (i, part) ->
-            val entry = "file '${part.absolutePath.replace("'", "'\\''")}'"
-            val range = keep?.getOrNull(i) ?: return@joinToString entry
-            entry + "\ninpoint ${range.first / 1000.0}\noutpoint ${range.last / 1000.0}"
+            val lines = mutableListOf("file '${part.absolutePath.replace("'", "'\\''")}'")
+            fileOption?.let { lines += it }
+            keep?.getOrNull(i)?.let { lines += "inpoint ${it.first / 1000.0}"; lines += "outpoint ${it.last / 1000.0}" }
+            lines.joinToString("\n")
         })
         // Chapters come from each part and are stored in the database instead
         val cmd = "-y -f concat -safe 0 -i \"${list.absolutePath}\" -map 0:a -map_chapters -1 -c copy -f mp4 \"${outFile.absolutePath}\""

@@ -102,9 +102,7 @@ class AaxImporter @Inject constructor(
                                 ?.let { return@runImport Fetched(error = it) }
                             files += part
                         }
-                        // Each part's link names its ASIN: /library/download?asin=B0CS52NYXV&codec=AAX
-                        val asins = urls.mapNotNull { Regex("[?&]asin=([A-Za-z0-9]{10})").find(it)?.groupValues?.get(1) }
-                        Fetched(files, asins = asins)
+                        Fetched(files)
                     }
                 } finally {
                     _websiteAsin.value = null
@@ -276,8 +274,8 @@ class AaxImporter @Inject constructor(
         if (_status.value?.finished == true) _status.value = null
     }
 
-    /** The .aax file(s) of one book, in order (with each part's ASIN when known), or why they couldn't be fetched. */
-    private class Fetched(val files: List<File> = emptyList(), val error: String? = null, val asins: List<String> = emptyList())
+    /** The .aax file(s) of one book, in order, or why they couldn't be fetched. */
+    private class Fetched(val files: List<File> = emptyList(), val error: String? = null)
 
     /**
      * [fetch] puts the book's .aax file(s) in the given folder, reporting steps and progress.
@@ -335,32 +333,40 @@ class AaxImporter @Inject constructor(
             val activationBytes = activationBytesProvider.getActivationBytes()
                 ?: return fail("Could not get activation bytes from Audible")
 
-            val converted = mutableListOf<File>()
-            for ((i, part) in parts.withIndex()) {
-                // The converter names its output after the input, so give each part its final name
-                val aax = File(importDir, if (parts.size == 1) "$baseName.aax" else "${baseName}_part${i + 1}.aax")
-                part.renameTo(aax)
-                val label = if (parts.size > 1) "Converting part ${i + 1} of ${parts.size}" else "Converting"
-                step(label)
-                converted += converter.convert(aax, activationBytes) { progress(label, it) }
-                    ?: return fail("Conversion failed — see the debug log")
-                aax.delete()
+            // The converter names its output after the input, so give each part its final name
+            val named = parts.mapIndexed { i, part ->
+                File(importDir, if (parts.size == 1) "$baseName.aax" else "${baseName}_part${i + 1}.aax").also { part.renameTo(it) }
             }
-
             var chapters = emptyList<ChapterEntity>()
-            val joined = if (converted.size == 1) converted[0] else {
-                chapters = partChapters(converted)
-                val total = converted.sumOf { durationMsOf(it) ?: 0L }
-                val out = File(importDir, "$baseName.${converted[0].extension}")
-                step("Joining ${converted.size} parts")
-                // With the parts' ASINs, Audible's chapter data gives chapter names and
-                // where the announcements between parts are
-                val plan = fetched.asins.takeIf { it.size == converted.size }?.let { planParts(converted, it) }
-                if (plan != null) chapters = plan.chapters
-                if (!converter.concat(converted, out, total, plan?.keep) { progress("Joining ${converted.size} parts", it) }) {
-                    return fail("Joining the parts failed — see the debug log")
+            val joined = if (named.size == 1) {
+                step("Converting")
+                converter.convert(named[0], activationBytes) { progress("Converting", it) }
+                    ?.also { named[0].delete() }
+                    ?: return fail("Conversion failed — see the debug log")
+            } else {
+                // The whole book's chapter data gives the chapter names and what to cut where the parts meet
+                val plan = match?.asin?.let { planParts(named, it) }
+                chapters = plan?.chapters ?: partChapters(named)
+                val total = plan?.keep?.sumOf { it.last - it.first } ?: named.sumOf { durationMsOf(it) ?: 0L }
+                val out = File(importDir, "$baseName.m4b")
+                val label = "Converting ${named.size} parts"
+                step(label)
+                // One pass, decrypting and joining together; else each part, then a join
+                if (!converter.decryptJoin(named, activationBytes, out, total, plan?.keep) { progress(label, it) }) {
+                    val converted = mutableListOf<File>()
+                    for ((i, aax) in named.withIndex()) {
+                        val partLabel = "Converting part ${i + 1} of ${named.size}"
+                        step(partLabel)
+                        converted += converter.convert(aax, activationBytes) { progress(partLabel, it) }
+                            ?: return fail("Conversion failed — see the debug log")
+                    }
+                    step("Joining ${converted.size} parts")
+                    if (!converter.concat(converted, out, total, plan?.keep) { progress("Joining ${converted.size} parts", it) }) {
+                        return fail("Joining the parts failed — see the debug log")
+                    }
+                    converted.forEach { it.delete() }
                 }
-                converted.forEach { it.delete() }
+                named.forEach { it.delete() }
                 out
             }
 
@@ -394,47 +400,51 @@ class AaxImporter @Inject constructor(
     private class PartPlan(val keep: List<LongRange>, val chapters: List<ChapterEntity>)
 
     /**
-     * Uses Audible's chapter data for each part: chapter names, and what to cut where the
-     * parts meet — the "This is Audible" intro of every part after the first, and whatever
-     * follows the last chapter (the "broken up into multiple pieces" notice and the brand
-     * outro) of every part before the last. Null when any part's data can't be had; the
-     * parts are then joined whole.
+     * Fits the whole book's chapters (Audible no longer serves chapter data for the part
+     * ASINs) to the parts, cutting what the parts add: the "This is Audible" intro of every
+     * part after the first, and the "broken up into multiple pieces" notice at the end of
+     * every part before the last. The parts' combined length minus the book's length is
+     * those intros and notices; with the intro's length from Audible, that gives the
+     * notice's, taken to be the same clip each time. The joined parts then line up with the
+     * book's chapter times. Null when the data is missing or the numbers don't add up; the
+     * parts are then joined whole with their own chapters.
      */
-    private suspend fun planParts(parts: List<File>, asins: List<String>): PartPlan? {
-        val keep = mutableListOf<LongRange>()
-        val chapters = mutableListOf<ChapterEntity>()
-        var offset = 0L
-        for ((i, part) in parts.withIndex()) {
-            val length = durationMsOf(part) ?: return null
-            val result = apiClient.getChapterInfo(asins[i])
-            val info = result.data ?: run {
-                debugLog.log("IMPORT", "No chapter data for part ${i + 1} (${asins[i]}): ${result.error ?: result.debugLog.lastOrNull()}")
-                return null
-            }
-            val contentEnd = info.chapters.maxOfOrNull { it.startOffsetMs + it.lengthMs }?.coerceAtMost(length) ?: length
-            val start = if (i > 0) info.brandIntroDurationMs.coerceIn(0, MAX_CUT_MS) else 0L
-            val end = if (i < parts.lastIndex) {
-                minOf(contentEnd, length - info.brandOutroDurationMs).coerceIn(length - MAX_CUT_MS, length)
-            } else {
-                length
-            }
-            debugLog.log("IMPORT", "Part ${i + 1} (${asins[i]}): ${length / 1000}s, chapters end at ${contentEnd / 1000}s, " +
-                "intro ${info.brandIntroDurationMs}ms, outro ${info.brandOutroDurationMs}ms; keeping ${start / 1000}–${end / 1000}s")
-            keep += start..end
-            for (c in apiClient.flattenChapters(info.chapters)) {
-                val s = maxOf(c.startOffsetMs, start)
-                val e = minOf(c.startOffsetMs + c.lengthMs, end)
-                if (e <= s) continue
-                chapters += ChapterEntity(
+    private suspend fun planParts(parts: List<File>, bookAsin: String): PartPlan? {
+        val lengths = parts.map { durationMsOf(it) ?: return null }
+        val result = apiClient.getChapterInfo(bookAsin)
+        val info = result.data ?: run {
+            debugLog.log("IMPORT", "No chapter data for $bookAsin: ${result.error ?: result.debugLog.lastOrNull()}")
+            return null
+        }
+        val bookLength = info.runtimeLengthMs.takeIf { it > 0 }
+            ?: info.chapters.maxOfOrNull { it.startOffsetMs + it.lengthMs }
+            ?: return null
+        val intro = info.brandIntroDurationMs
+        val extra = lengths.sum() - bookLength
+        val notice = extra / (parts.size - 1) - intro
+        debugLog.log("IMPORT", "Parts ${lengths.joinToString { "${it / 1000}s" }} = ${lengths.sum() / 1000}s; book ${bookLength / 1000}s; " +
+            "intro ${intro}ms, outro ${info.brandOutroDurationMs}ms → notice ${notice}ms per part")
+        if (intro !in 0..MAX_CUT_MS || notice !in 0..MAX_CUT_MS) {
+            debugLog.log("IMPORT", "Those don't add up — joining the parts whole, with their own chapters")
+            return null
+        }
+        val keep = lengths.mapIndexed { i, length ->
+            val start = if (i > 0) intro else 0L
+            val end = if (i < parts.lastIndex) length - notice else length
+            start..end
+        }
+        val chapters = apiClient.flattenChapters(info.chapters)
+            .filter { it.startOffsetMs < bookLength }
+            .mapIndexed { i, c ->
+                ChapterEntity(
                     bookId = 0,
-                    title = c.title.ifBlank { "Chapter ${chapters.size + 1}" },
-                    startPositionMs = offset + s - start,
-                    endPositionMs = offset + e - start,
-                    index = chapters.size
+                    title = c.title.ifBlank { "Chapter ${i + 1}" },
+                    startPositionMs = c.startOffsetMs,
+                    endPositionMs = minOf(c.startOffsetMs + c.lengthMs, bookLength),
+                    index = i
                 )
             }
-            offset += end - start
-        }
+        debugLog.log("IMPORT", "Using $bookAsin's ${chapters.size} chapters")
         return PartPlan(keep, chapters)
     }
 
