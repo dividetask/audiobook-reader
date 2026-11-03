@@ -67,6 +67,7 @@ import com.dividetask.audiobookreader.data.db.entity.ChapterEntity
 import com.dividetask.audiobookreader.data.db.entity.ListenSessionEntity
 import com.dividetask.audiobookreader.data.db.entity.PositionJumpEntity
 import com.dividetask.audiobookreader.ui.common.ChapterSkipIcon
+import com.dividetask.audiobookreader.ui.common.FullScreenImage
 import com.dividetask.audiobookreader.ui.common.PauseIcon
 import com.dividetask.audiobookreader.ui.common.SkipSecondsIcon
 import java.text.SimpleDateFormat
@@ -91,6 +92,7 @@ fun PlayerScreen(
     var seekPosition by remember { mutableFloatStateOf(0f) }
     var showChapters by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    var showCover by remember { mutableStateOf(false) }
 
     LaunchedEffect(bookId) {
         viewModel.loadBook(bookId)
@@ -156,7 +158,8 @@ fun PlayerScreen(
                     AsyncImage(
                         model = book?.coverUri,
                         contentDescription = "Book cover",
-                        modifier = Modifier.fillMaxSize(),
+                        // Tap to see it full screen, with pinch to zoom
+                        modifier = Modifier.fillMaxSize().clickable { showCover = true },
                         contentScale = ContentScale.Crop
                     )
                 } else {
@@ -384,6 +387,10 @@ fun PlayerScreen(
                 Spacer(modifier = Modifier.height(24.dp))
             }
         }
+    }
+
+    if (showCover) {
+        FullScreenImage(model = book?.coverUri, contentDescription = "Book cover", onDismiss = { showCover = false })
     }
 
     if (showChapters) {
