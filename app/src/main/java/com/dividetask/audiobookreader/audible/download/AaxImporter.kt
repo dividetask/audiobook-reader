@@ -59,6 +59,10 @@ class AaxImporter @Inject constructor(
     private val _status = MutableStateFlow<AaxImportStatus?>(null)
     val status: StateFlow<AaxImportStatus?> = _status.asStateFlow()
 
+    /** The book being downloaded from the website, which isn't "pending" while that runs. */
+    private val _websiteAsin = MutableStateFlow<String?>(null)
+    val websiteAsin: StateFlow<String?> = _websiteAsin.asStateFlow()
+
     private val audiobooksDir: File
         get() = File(context.getExternalFilesDir(null), "audiobooks").apply { mkdirs() }
 
@@ -86,19 +90,24 @@ class AaxImporter @Inject constructor(
     fun importFromWebsite(urls: List<String>, userAgent: String?, asin: String, title: String) {
         scope.launch {
             mutex.withLock {
-                runImport("$title.aax", knownAsin = asin) { dir, step, progress ->
-                    val files = mutableListOf<File>()
-                    for ((i, url) in urls.withIndex()) {
-                        val label = if (urls.size > 1) "Downloading part ${i + 1} of ${urls.size}" else "Downloading from Audible website"
-                        step(label)
-                        val part = File(dir, "part${i + 1}.aax")
-                        downloadWithWebsiteCookies(url, userAgent, part) { progress(label, it) }
-                            ?.let { return@runImport Fetched(error = it) }
-                        files += part
+                _websiteAsin.value = asin
+                try {
+                    runImport("$title.aax", knownAsin = asin) { dir, step, progress ->
+                        val files = mutableListOf<File>()
+                        for ((i, url) in urls.withIndex()) {
+                            val label = if (urls.size > 1) "Downloading part ${i + 1} of ${urls.size}" else "Downloading from Audible website"
+                            step(label)
+                            val part = File(dir, "part${i + 1}.aax")
+                            downloadWithWebsiteCookies(url, userAgent, part) { progress(label, it) }
+                                ?.let { return@runImport Fetched(error = it) }
+                            files += part
+                        }
+                        // Each part's link names its ASIN: /library/download?asin=B0CS52NYXV&codec=AAX
+                        val asins = urls.mapNotNull { Regex("[?&]asin=([A-Za-z0-9]{10})").find(it)?.groupValues?.get(1) }
+                        Fetched(files, asins = asins)
                     }
-                    // Each part's link names its ASIN: /library/download?asin=B0CS52NYXV&codec=AAX
-                    val asins = urls.mapNotNull { Regex("[?&]asin=([A-Za-z0-9]{10})").find(it)?.groupValues?.get(1) }
-                    Fetched(files, asins = asins)
+                } finally {
+                    _websiteAsin.value = null
                 }
             }
         }
@@ -472,7 +481,7 @@ class AaxImporter @Inject constructor(
     private fun copyFromUri(uri: Uri, dest: File, onProgress: (Float) -> Unit): String? {
         val size = fileSize(uri)
         context.contentResolver.openInputStream(uri)?.use { input ->
-            dest.outputStream().use { output -> copyStream(input, output, size, onProgress) }
+            dest.outputStream().use { output -> copyStream(input, output, size, 0, onProgress) }
         } ?: return "Could not open the file"
         return null
     }
@@ -509,9 +518,17 @@ class AaxImporter @Inject constructor(
                             debugLog.log("IMPORT", "Not a book: $type ${body.take(300)}")
                             return message?.let { "Audible: $it" } ?: "Audible sent a web page instead of the book — sign in again"
                         }
-                        connection.inputStream.use { input ->
-                            dest.outputStream().use { output -> copyStream(input, output, connection.contentLengthLong, onProgress) }
+                        val total = connection.contentLengthLong
+                        val broken = try {
+                            connection.inputStream.use { input ->
+                                dest.outputStream().use { output -> copyStream(input, output, total, 0, onProgress) }
+                            }
+                            if (total > 0 && dest.length() < total) java.io.IOException("ended early") else null
+                        } catch (e: java.io.IOException) {
+                            e
                         }
+                        // A dropped connection picks up where it stopped instead of failing the import
+                        broken?.let { resumeDownload(current, userAgent, dest, total, it, onProgress) }?.let { return it }
                         // .aax files are MP4 containers: "ftyp" at byte 4
                         val header = ByteArray(8)
                         dest.inputStream().use { it.read(header) }
@@ -532,9 +549,57 @@ class AaxImporter @Inject constructor(
         return "Too many redirects"
     }
 
-    private fun copyStream(input: java.io.InputStream, output: java.io.OutputStream, size: Long, onProgress: (Float) -> Unit) {
+    /**
+     * Continues a download that broke off, asking for the rest of the file from where
+     * [dest] ends. Null once it's complete, else why it couldn't be.
+     */
+    private fun resumeDownload(
+        url: String,
+        userAgent: String?,
+        dest: File,
+        total: Long,
+        first: java.io.IOException,
+        onProgress: (Float) -> Unit
+    ): String? {
+        var error: java.io.IOException = first
+        for (attempt in 1..RESUME_ATTEMPTS) {
+            val have = dest.length()
+            debugLog.log("IMPORT", "Download broke at ${have / 1_048_576}MB of ${total / 1_048_576}MB (${error.message}) — resuming, try $attempt of $RESUME_ATTEMPTS")
+            Thread.sleep(attempt * 5_000L)
+            val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            try {
+                android.webkit.CookieManager.getInstance().getCookie(url)?.let { connection.setRequestProperty("Cookie", it) }
+                userAgent?.let { connection.setRequestProperty("User-Agent", it) }
+                connection.setRequestProperty("Range", "bytes=$have-")
+                val started = System.currentTimeMillis()
+                val code = connection.responseCode
+                requestLog.request("website-download", "GET", url, code,
+                    System.currentTimeMillis() - started, connection.contentLengthLong, "resume from $have")
+                // 206: the rest of the file; 200: the server ignored the range, so start over
+                val append = code == 206
+                if (code != 206 && code != 200) return "Download broke and couldn't be resumed (HTTP $code)"
+                connection.inputStream.use { input ->
+                    java.io.FileOutputStream(dest, append).use { output ->
+                        copyStream(input, output, total, if (append) have else 0, onProgress)
+                    }
+                }
+                if (total <= 0 || dest.length() >= total) {
+                    debugLog.log("IMPORT", "Resumed download finished: ${dest.length() / 1_048_576}MB")
+                    return null
+                }
+                error = java.io.IOException("ended early")
+            } catch (e: java.io.IOException) {
+                error = e
+            } finally {
+                connection.disconnect()
+            }
+        }
+        return "Download kept breaking off: ${error.message}"
+    }
+
+    private fun copyStream(input: java.io.InputStream, output: java.io.OutputStream, size: Long, alreadyHave: Long, onProgress: (Float) -> Unit) {
         val buffer = ByteArray(1 shl 20)
-        var copied = 0L
+        var copied = alreadyHave
         while (true) {
             val n = input.read(buffer)
             if (n < 0) break
@@ -603,5 +668,6 @@ class AaxImporter @Inject constructor(
         val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png")
         // Never cut more than this from either end of a part, whatever Audible's data says
         const val MAX_CUT_MS = 3 * 60_000L
+        const val RESUME_ATTEMPTS = 5
     }
 }

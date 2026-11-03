@@ -29,6 +29,7 @@ import android.content.Intent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -83,7 +84,10 @@ class MainViewModel @Inject constructor(
 
     val downloadProgress: StateFlow<DownloadProgress?> = downloadManager.downloadProgress
     val queuedAsins: StateFlow<Set<String>> = downloadManager.queuedAsins
-    val pendingDownloads = downloadManager.pendingDownloads
+    // A book downloading from the website isn't waiting on Audible's limit meanwhile
+    val pendingDownloads = combine(downloadManager.pendingDownloads, aaxImporter.websiteAsin) { pending, asin ->
+        if (asin == null) pending else pending - asin
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, downloadManager.pendingDownloads.value)
     val websiteOffer = downloadManager.websiteOffer
 
     fun dismissWebsiteOffer() = downloadManager.dismissWebsiteOffer()
