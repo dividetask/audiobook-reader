@@ -41,7 +41,7 @@ All code optimizations and obfuscation are disabled for debuggable builds.
 > Task :app:kspDebugKotlin
 
 > Task :app:compileDebugKotlin
-w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/common/SeriesList.kt:173:40 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
+w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/common/SeriesList.kt:175:40 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
 
 > Task :app:compileDebugJavaWithJavac
 > Task :app:hiltAggregateDepsDebug UP-TO-DATE
