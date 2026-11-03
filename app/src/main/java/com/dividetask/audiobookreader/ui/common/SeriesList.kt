@@ -130,6 +130,8 @@ fun <T> LazyListScope.bookListEntries(
     entries: List<BookListEntry<T>>,
     expandedSeries: Set<String>,
     onToggleSeries: (String) -> Unit,
+    /** A short status under a series' name, e.g. that one of its books is downloading. */
+    headerNote: (BookListEntry.Series<T>) -> String? = { null },
     keyOf: (T) -> Any,
     book: @Composable (T) -> Unit,
     missing: @Composable (SeriesMember<T>) -> Unit
@@ -140,7 +142,7 @@ fun <T> LazyListScope.bookListEntries(
             is BookListEntry.Series -> {
                 val expanded = entry.seriesAsin in expandedSeries
                 item(key = "series_${entry.seriesAsin}") {
-                    SeriesHeaderItem(entry, expanded, onClick = { onToggleSeries(entry.seriesAsin) })
+                    SeriesHeaderItem(entry, expanded, headerNote(entry), onClick = { onToggleSeries(entry.seriesAsin) })
                 }
                 if (expanded) {
                     entry.members.forEach { member ->
@@ -158,7 +160,7 @@ fun <T> LazyListScope.bookListEntries(
 }
 
 @Composable
-private fun SeriesHeaderItem(series: BookListEntry.Series<*>, expanded: Boolean, onClick: () -> Unit) {
+private fun SeriesHeaderItem(series: BookListEntry.Series<*>, expanded: Boolean, note: String?, onClick: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
@@ -179,6 +181,7 @@ private fun SeriesHeaderItem(series: BookListEntry.Series<*>, expanded: Boolean,
                 val count = series.members.size
                 Text("Series · $count ${if (count == 1) "book" else "books"} · ${series.ownedCount} owned",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                note?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary) }
             }
             Icon(
                 if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,

@@ -75,6 +75,7 @@ import coil.compose.AsyncImage
 import com.dividetask.audiobookreader.audible.download.DownloadProgress
 import com.dividetask.audiobookreader.data.series.SeriesIndex
 import com.dividetask.audiobookreader.audible.download.PendingDownload
+import com.dividetask.audiobookreader.ui.common.BookListEntry
 import com.dividetask.audiobookreader.ui.common.PauseIcon
 import com.dividetask.audiobookreader.ui.common.SeriesMember
 import com.dividetask.audiobookreader.ui.common.SeriesPlaceholderItem
@@ -138,7 +139,11 @@ fun MainScreen(
                 downloadState = audibleProgress(owned, downloadProgress, queuedAsins),
                 pendingUntil = pendingDownloads[owned.asin]?.nextAttemptAt,
                 onDownload = { viewModel.downloadAudibleBook(owned) },
-                onDelete = { audibleBookToDelete = owned }
+                onDelete = { audibleBookToDelete = owned },
+                onCancel = {
+                    if (owned.asin in pendingDownloads) viewModel.removePending(owned.asin) else viewModel.cancelDownload()
+                },
+                onWebsite = { onWebsiteDownload(owned.asin) }
             )
         } else {
             SeriesPlaceholderItem(member, "Not purchased")
@@ -476,9 +481,16 @@ private fun LocalBooksList(
         }
         groupBySeries(books, seriesIndex, seriesIndex::forLocal, { it.title }, { it.coverUri }, order)
     }
-    val activeDownload = downloadProgress?.takeIf { it.state in listOf(DownloadState.DOWNLOADING, DownloadState.WAITING_FOR_WIFI, DownloadState.CONVERTING) }
-    val waiting = pending.filter { it.asin != activeDownload?.asin && it.asin !in queuedAsins }
-    val hasDownloads = activeDownload != null || queuedAsins.isNotEmpty() || waiting.isNotEmpty()
+    // Books in a series on this tab show their download in the series instead of a card above
+    val inSeries = remember(entries) {
+        entries.filterIsInstance<BookListEntry.Series<*>>().flatMap { s -> s.members.mapNotNull { it.asin } }.toSet()
+    }
+    val activeDownload = downloadProgress
+        ?.takeIf { it.state in listOf(DownloadState.DOWNLOADING, DownloadState.WAITING_FOR_WIFI, DownloadState.CONVERTING) }
+        ?.takeIf { it.asin !in inSeries || it.state == DownloadState.CONVERTING }
+    val queuedHere = queuedAsins.filter { it !in inSeries }
+    val waiting = pending.filter { it.asin != downloadProgress?.asin && it.asin !in queuedAsins && it.asin !in inSeries }
+    val hasDownloads = activeDownload != null || queuedHere.isNotEmpty() || waiting.isNotEmpty()
 
     if (books.isEmpty() && !hasDownloads) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -511,7 +523,7 @@ private fun LocalBooksList(
                         )
                     }
                 }
-                items(queuedAsins.toList(), key = { "q_$it" }) { asin ->
+                items(queuedHere, key = { "q_$it" }) { asin ->
                     DownloadingBookItem(
                         title = queuedTitle(asin),
                         state = DownloadState.QUEUED,
@@ -531,6 +543,15 @@ private fun LocalBooksList(
                 entries = entries,
                 expandedSeries = expandedSeries,
                 onToggleSeries = onToggleSeries,
+                headerNote = { series ->
+                    val asins = series.members.mapNotNull { it.asin }
+                    when {
+                        downloadProgress?.asin in asins && downloadProgress?.state != DownloadState.ERROR -> "Downloading"
+                        asins.any { it in queuedAsins } -> "Download queued"
+                        pending.any { it.asin in asins } -> "Download pending"
+                        else -> null
+                    }
+                },
                 keyOf = { it.id },
                 book = { book ->
                     val (hasAax, hasConverted) = fileChecker(book)
@@ -833,7 +854,11 @@ private fun AudibleBookItem(
     /** Next automatic try when Audible's download limit turned this book away. */
     pendingUntil: Long? = null,
     onDownload: () -> Unit,
-    onDelete: () -> Unit = {}
+    onDelete: () -> Unit = {},
+    /** Stops this book's download or its automatic retries; null shows no cancel button. */
+    onCancel: (() -> Unit)? = null,
+    /** Downloads it from the Audible website instead, while it's pending. */
+    onWebsite: (() -> Unit)? = null
 ) {
     Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -859,9 +884,19 @@ private fun AudibleBookItem(
                         .format(java.util.Date(pendingUntil))
                     Text("Pending — next try $time", style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFFFF9800))
+                    onWebsite?.let { TextButton(onClick = it) { Text("Download from website") } }
+                }
+            }
+            val busy = downloadState?.state in listOf(DownloadState.DOWNLOADING, DownloadState.WAITING_FOR_WIFI, DownloadState.QUEUED) ||
+                (pendingUntil != null && !isDownloaded)
+            if (busy && onCancel != null) {
+                IconButton(onClick = onCancel) {
+                    Icon(Icons.Default.Close, contentDescription = "Cancel download")
                 }
             }
             when {
+                // Pending: the cancel button above is its only action
+                pendingUntil != null && !isDownloaded && onCancel != null && downloadState == null -> {}
                 isDownloaded -> IconButton(onClick = onDelete) {
                     Icon(Icons.Default.Delete, contentDescription = "Delete download",
                         tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(28.dp))
