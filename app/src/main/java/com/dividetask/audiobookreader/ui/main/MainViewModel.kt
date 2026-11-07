@@ -143,13 +143,22 @@ class MainViewModel @Inject constructor(
 
     fun clearAaxImportStatus() = aaxImporter.clearStatus()
 
+    /** Adds the picked files, first asking if they'd leave the phone nearly full. */
+    fun importLocalBooks(uris: List<Uri>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val bytes = uris.sumOf { sizeOf(it).coerceAtLeast(0) }
+            val what = if (uris.size == 1) "\"${displayName(uris[0]).substringBeforeLast('.')}\"" else "these ${uris.size} files"
+            withSpaceCheck(bytes, what) { addFiles(uris) }
+        }
+    }
+
     /**
      * Picked files can be several books, some split into parts (e.g. one file per chapter).
      * Audio files with the same album tag are one book; files with no album tag are grouped
      * by folder. A book of several files is joined into one; .aax files are each their own
      * book. An image is used as the cover of the books in its folder.
      */
-    fun importLocalBooks(uris: List<Uri>) {
+    private fun addFiles(uris: List<Uri>) {
         // A single file is a book whatever its name says
         if (uris.size == 1) return importLocalBook(uris[0])
         viewModelScope.launch(Dispatchers.IO) {
@@ -190,20 +199,8 @@ class MainViewModel @Inject constructor(
                     aaxImporter.import(uri, name)
                     return@launch
                 }
-                context.contentResolver.takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-                val existing = bookRepository.getBookByFileUri(uri.toString())
-                if (existing != null) {
-                    _importError.value = "Book already in library"
-                    return@launch
-                }
-                val metadata = metadataExtractor.extract(uri)
-                val bookEntity = metadataExtractor.toBookEntity(uri, metadata)
-                val chapters = metadataExtractor.toChapterEntities(0, metadata)
-                bookRepository.insertBook(bookEntity, chapters)
-                // Find its series on Audible now rather than at the next library sync
-                seriesRepository.refresh()
+                // Copied into the app, so it plays without the drive or folder it came from
+                aaxImporter.importCopy(uri, name)
             } catch (e: Exception) {
                 _importError.value = "Failed to import: ${e.message}"
             }
@@ -256,8 +253,54 @@ class MainViewModel @Inject constructor(
                 com.dividetask.audiobookreader.audible.api.AudibleImages(image500 = it)
             }
         )
-        downloadManager.queueDownload(book)
+        // Audible's .aax files are about 64 kbit/s: 8 KB a second
+        val estimate = (audibleBook.runtimeMinutes ?: 0) * 60L * 8_000L
+        withSpaceCheck(estimate, "\"${audibleBook.title}\"") { downloadManager.queueDownload(book) }
     }
+
+    /** A warning shown before adding a book that would leave the phone [FULL_WARNING] full or more. */
+    data class StorageWarning(val message: String, val proceed: () -> Unit)
+
+    private val _storageWarning = MutableStateFlow<StorageWarning?>(null)
+    val storageWarning: StateFlow<StorageWarning?> = _storageWarning.asStateFlow()
+
+    fun confirmStorageWarning() {
+        _storageWarning.value?.proceed?.invoke()
+        _storageWarning.value = null
+    }
+
+    fun dismissStorageWarning() {
+        _storageWarning.value = null
+    }
+
+    /**
+     * Runs [proceed] if [bytes] more leaves the phone under [FULL_WARNING] full; asks first if
+     * not, and refuses if it can't fit at all.
+     */
+    private fun withSpaceCheck(bytes: Long, what: String, proceed: () -> Unit) {
+        val stat = android.os.StatFs((context.getExternalFilesDir(null) ?: context.filesDir).path)
+        val total = stat.totalBytes
+        val free = stat.availableBytes
+        fun gb(b: Long) = String.format(java.util.Locale.US, "%.1f GB", b / 1e9)
+        if (bytes > free) {
+            _importError.value = "Not enough space for $what: it needs about ${gb(bytes)} and ${gb(free)} is free"
+            return
+        }
+        val fullAfter = 1.0 - (free - bytes).toDouble() / total
+        if (bytes > 0 && fullAfter >= FULL_WARNING) {
+            _storageWarning.value = StorageWarning(
+                "Adding $what (about ${gb(bytes)}) will leave your phone ${(fullAfter * 100).toInt()}% full, " +
+                    "with ${gb(free - bytes)} free. Add it anyway?",
+                proceed
+            )
+        } else {
+            proceed()
+        }
+    }
+
+    private fun sizeOf(uri: Uri): Long =
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)
+            ?.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else -1L } ?: -1L
 
     fun cancelDownload() = downloadManager.cancelDownload()
     fun isBookDownloaded(asin: String): Boolean = downloadManager.isBookDownloaded(asin)
@@ -478,5 +521,6 @@ class MainViewModel @Inject constructor(
         val AUDIO_EXTENSIONS = listOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "wma")
         val IMAGE_EXTENSIONS = listOf("jpg", "jpeg", "png")
         const val FORCED_SYNC_COOLDOWN_MS = 30_000L
+        const val FULL_WARNING = 0.9
     }
 }

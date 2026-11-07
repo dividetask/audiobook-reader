@@ -251,6 +251,8 @@ class SeriesRepository @Inject constructor(
             if (match != null) break
             debugLog.log("SERIES", "  ${query.keys.joinToString("+")} search for $title: ${products.size} results" +
                 products.take(3).joinToString(prefix = if (products.isEmpty()) "" else ": ") { "${it["title"].str()} / ${it["subtitle"].str()}" })
+            // What Audible actually sent, to see why searches come back without titles
+            debugLog.log("SERIES", "    response: ${data.toString().take(600)}")
         }
         val series = match?.get("series").arr().firstOrNull().obj()
         debugLog.log("SERIES", "Lookup $title: ${match?.let { "${it["asin"].str()} ${it["title"].str()} / ${series?.get("title").str() ?: "no series"}" } ?: "no match"}")

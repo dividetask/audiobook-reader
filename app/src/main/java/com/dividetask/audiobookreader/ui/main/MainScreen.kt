@@ -115,6 +115,7 @@ fun MainScreen(
     }
     val isSyncing by viewModel.isSyncing.collectAsState()
     val importError by viewModel.importError.collectAsState()
+    val storageWarning by viewModel.storageWarning.collectAsState()
     val aaxImport by viewModel.aaxImportStatus.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
     val queuedAsins by viewModel.queuedAsins.collectAsState()
@@ -374,6 +375,17 @@ fun MainScreen(
                 tabContent()
             }
         }
+    }
+
+    // Adding a book would leave the phone nearly full
+    storageWarning?.let { warning ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissStorageWarning() },
+            title = { Text("Storage nearly full") },
+            text = { Text(warning.message) },
+            confirmButton = { TextButton(onClick = { viewModel.confirmStorageWarning() }) { Text("Add anyway") } },
+            dismissButton = { TextButton(onClick = { viewModel.dismissStorageWarning() }) { Text("Cancel") } }
+        )
     }
 
     // A download was blocked by Audible's download limit: offer the website instead

@@ -83,6 +83,50 @@ class AaxImporter @Inject constructor(
     }
 
     /**
+     * Copies a single audio file into the app, so the book keeps playing when the drive or
+     * folder it came from is gone, and adds it to the library. The original is left as is.
+     */
+    fun importCopy(uri: Uri, displayName: String) {
+        scope.launch { mutex.withLock { runCopy(uri, displayName) } }
+    }
+
+    private suspend fun runCopy(uri: Uri, displayName: String) {
+        var title = displayName.substringBeforeLast('.')
+        debugLog.section("Import file: $displayName")
+        var lastProgressAt = 0L
+        val dest = File(audiobooksDir, "import_${System.currentTimeMillis()}.${displayName.substringAfterLast('.', "m4b").lowercase()}")
+        fun fail(text: String) {
+            debugLog.log("IMPORT", "FAILED: $text")
+            _status.value = AaxImportStatus(title, "Import failed: $text", finished = true)
+            dest.delete()
+        }
+        try {
+            debugLog.log("IMPORT", "Copying into the app: ${fileSize(uri) / 1_048_576}MB")
+            _status.value = AaxImportStatus(title, "Copying")
+            copyFromUri(uri, dest) { fraction ->
+                val now = System.currentTimeMillis()
+                if (now - lastProgressAt >= 250 || fraction >= 1f) {
+                    lastProgressAt = now
+                    _status.value = AaxImportStatus(title, "Copying", progress = fraction)
+                }
+            }?.let { return fail(it) }
+            val fileUri = Uri.fromFile(dest)
+            val metadata = metadataExtractor.extract(fileUri)
+            // Untagged files are named after the original file, not the app's copy
+            title = metadata.title.takeUnless { it == dest.nameWithoutExtension } ?: title
+            bookRepository.insertBook(
+                metadataExtractor.toBookEntity(fileUri, metadata).copy(title = title),
+                metadataExtractor.toChapterEntities(0, metadata)
+            )
+            debugLog.log("IMPORT", "Added to library: ${dest.name} ($title)")
+            seriesRepository.refresh()
+            _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
+        } catch (e: Exception) {
+            fail("${e::class.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
      * Downloads [asin] from the Audible website (when the API's download limit blocks it),
      * using the website session the in-app browser signed into, then imports it. [urls] are
      * the book's download links in order: one, or one per part for books Audible splits.
