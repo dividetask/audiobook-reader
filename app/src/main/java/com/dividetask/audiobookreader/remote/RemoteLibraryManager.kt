@@ -38,7 +38,9 @@ class RemoteLibraryManager @Inject constructor(
     private val tokenStore: AudibleTokenStore,
     private val bookRepository: BookRepository,
     private val metadataExtractor: MetadataExtractor,
-    private val debugLog: AppDebugLog
+    private val debugLog: AppDebugLog,
+    // Lazy: the importer depends on this class through the series repository
+    private val aaxImporter: dagger.Lazy<com.dividetask.audiobookreader.audible.download.AaxImporter>
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val downloadMutex = Mutex()
@@ -155,8 +157,10 @@ class RemoteLibraryManager @Inject constructor(
                 coverUri = null, fileUri = uri.toString(), durationMs = 0
             )
         }
-        bookRepository.insertBook(entity, metadata?.let { metadataExtractor.toChapterEntities(0, it) } ?: emptyList())
+        val id = bookRepository.insertBook(entity, metadata?.let { metadataExtractor.toChapterEntities(0, it) } ?: emptyList())
         debugLog.log("SFTP", "Added to library: ${entity.title}")
+        // Only one copy of a book
+        aaxImporter.get().removeOtherCopies(id)
     }
 
     private fun onWifi(): Boolean {

@@ -66,7 +66,7 @@ class AudibleDownloadManager @Inject constructor(
     private val activationBytesProvider: ActivationBytesProvider,
     private val pendingStore: PendingDownloadStore,
     private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog,
-    // Lazy: only read when retrying
+    // Lazy: only used when retrying and after a download
     private val aaxImporter: dagger.Lazy<AaxImporter>
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -417,10 +417,12 @@ class AudibleDownloadManager @Inject constructor(
                         val authorName = book.authors?.firstOrNull()?.name ?: "Unknown Author"
                         val durationMs = (book.runtimeLengthMin ?: 0) * 60_000L
 
-                        bookRepository.insertBook(BookEntity(
+                        val id = bookRepository.insertBook(BookEntity(
                             title = title, author = authorName, coverUri = bookCoverUrl,
                             fileUri = android.net.Uri.fromFile(m4bFile).toString(), durationMs = durationMs
                         ), emptyList())
+                        // Only one copy of a book
+                        aaxImporter.get().removeOtherCopies(id)
                         completedAsins.add(asin)
                         dl("Complete — added to library")
 
@@ -439,10 +441,12 @@ class AudibleDownloadManager @Inject constructor(
                 val authorName = book.authors?.firstOrNull()?.name ?: "Unknown Author"
                 val durationMs = (book.runtimeLengthMin ?: 0) * 60_000L
 
-                bookRepository.insertBook(BookEntity(
+                val id = bookRepository.insertBook(BookEntity(
                     title = title, author = authorName, coverUri = bookCoverUrl,
                     fileUri = android.net.Uri.fromFile(outputFile).toString(), durationMs = durationMs
                 ), emptyList())
+                // Only one copy of a book
+                aaxImporter.get().removeOtherCopies(id)
                 completedAsins.add(asin)
                 dl("Saved as AAX (conversion unavailable)")
 

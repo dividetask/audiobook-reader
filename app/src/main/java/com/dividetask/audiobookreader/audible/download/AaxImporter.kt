@@ -125,20 +125,54 @@ class AaxImporter @Inject constructor(
         }
     }
 
+    /** Removes the book an import replaces (the user chose Replace), and any other copy. */
+    private suspend fun replace(oldId: Long?, newId: Long, @Suppress("UNUSED_PARAMETER") newDurationMs: Long) {
+        val keep = bookRepository.getBookById(newId) ?: return
+        oldId?.let { bookRepository.getBookById(it) }?.let { merge(keep, it) }
+        removeOtherCopies(newId)
+    }
+
     /**
-     * Removes the book an import replaces, its file included, once the new copy is in. If
-     * it's the same recording (same length to within 2%), the new copy keeps the old one's
-     * place in the book.
+     * Only one copy of a book: removes every other book with the same title and author as
+     * [keepId], its file included. Call after adding a book, however it was added.
      */
-    private suspend fun replace(oldId: Long?, newId: Long, newDurationMs: Long) {
-        val old = oldId?.let { bookRepository.getBookById(it) } ?: return
-        val sameRecording = kotlin.math.abs(old.durationMs - newDurationMs) <= maxOf(old.durationMs, newDurationMs) / 50
-        if (sameRecording && old.currentPositionMs > 0) {
-            bookRepository.updatePosition(newId, old.currentPositionMs, old.currentChapterIndex)
+    suspend fun removeOtherCopies(keepId: Long) {
+        val keep = bookRepository.getBookById(keepId) ?: return
+        bookRepository.getAllBooksOnce()
+            .filter { it.id != keep.id && copyKey(it) == copyKey(keep) }
+            .forEach { merge(keep, it) }
+    }
+
+    private fun copyKey(book: BookEntity) =
+        com.dividetask.audiobookreader.data.series.SeriesIndex.normalize(book.title) + "|" +
+            com.dividetask.audiobookreader.data.series.SeriesIndex.normalize(book.author)
+
+    /**
+     * Removes [other], a copy of [keep]. If it's the same recording (lengths within 2%) and
+     * was played more recently, [keep] takes over its place in the book.
+     */
+    private suspend fun merge(keep: BookEntity, other: BookEntity) {
+        val sameRecording = kotlin.math.abs(keep.durationMs - other.durationMs) <= maxOf(keep.durationMs, other.durationMs) / 50
+        val takePlace = sameRecording && other.currentPositionMs > 0 && other.lastPlayed >= keep.lastPlayed
+        if (takePlace) bookRepository.updatePosition(keep.id, other.currentPositionMs, other.currentChapterIndex)
+        bookRepository.deleteBook(other.id)
+        if (other.fileUri != keep.fileUri) removeFile(other.fileUri)
+        debugLog.log("LIB", "Removed another copy of ${keep.title} (${other.fileUri.substringAfterLast('/')})${if (takePlace) ", keeping its place" else ""}")
+    }
+
+    /**
+     * Merges copies already in the library into one each, keeping the copy in the app's
+     * storage (else the most recently played).
+     */
+    private suspend fun removeExistingCopies() {
+        val appDir = context.getExternalFilesDir(null)?.canonicalPath
+        fun inApp(book: BookEntity) = Uri.parse(book.fileUri).let { uri ->
+            uri.scheme == "file" && appDir != null && uri.path?.let { File(it).canonicalPath.startsWith(appDir) && File(it).exists() } == true
         }
-        bookRepository.deleteBook(old.id)
-        removeFile(old.fileUri)
-        debugLog.log("IMPORT", "Replaced the earlier copy (${old.fileUri.substringAfterLast('/')})${if (sameRecording) ", keeping its place" else ""}")
+        for (copies in bookRepository.getAllBooksOnce().groupBy(::copyKey).values.filter { it.size > 1 }) {
+            val keep = copies.sortedWith(compareByDescending<BookEntity> { inApp(it) }.thenByDescending { it.lastPlayed }).first()
+            copies.filter { it.id != keep.id }.forEach { merge(keep, it) }
+        }
     }
 
     /** Deletes a book's file if it's in the app's storage; for a file elsewhere, lets go of the permission to read it. */
@@ -166,6 +200,7 @@ class AaxImporter @Inject constructor(
     fun copyExternalBooks() {
         scope.launch {
             mutex.withLock {
+                removeExistingCopies()
                 val external = bookRepository.getAllBooksOnce().filter { it.fileUri.startsWith("content://") }
                 if (external.isEmpty()) return@withLock
                 debugLog.section("Copy ${external.size} added book(s) into the app")
@@ -508,7 +543,7 @@ class AaxImporter @Inject constructor(
                 joined.delete()
             }
 
-            bookRepository.insertBook(
+            val id = bookRepository.insertBook(
                 BookEntity(
                     title = title,
                     author = match?.author ?: tags.artist ?: "Unknown Author",
@@ -521,6 +556,7 @@ class AaxImporter @Inject constructor(
                 chapters
             )
             debugLog.log("IMPORT", "Added to library: ${dest.name}${if (chapters.isNotEmpty()) ", ${chapters.size} chapters" else ""}")
+            removeOtherCopies(id)
             // No longer waiting on Audible's download limit
             match?.asin?.let { pendingStore.remove(it) }
             _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
