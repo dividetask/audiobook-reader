@@ -60,6 +60,22 @@ class MetadataExtractor @Inject constructor(
         }
     }
 
+    /** The file's title and author tags, either null when missing. */
+    fun readTitleAuthor(uri: Uri): Pair<String?, String?> {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, uri)
+            val title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() }
+            val author = (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST))?.takeIf { it.isNotBlank() }
+            title to author
+        } catch (e: Exception) {
+            null to null
+        } finally {
+            retriever.release()
+        }
+    }
+
     /** The file's album tag, which names the book when it's split into several files. */
     fun readAlbum(uri: Uri): String? {
         val retriever = MediaMetadataRetriever()

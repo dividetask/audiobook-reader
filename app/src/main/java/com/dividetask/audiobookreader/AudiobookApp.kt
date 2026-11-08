@@ -16,6 +16,7 @@ class AudiobookApp : Application(), Configuration.Provider {
     @Inject lateinit var backgroundWork: BackgroundWork
     @Inject lateinit var downloadManager: AudibleDownloadManager
     @Inject lateinit var debugLog: AppDebugLog
+    @Inject lateinit var aaxImporter: com.dividetask.audiobookreader.audible.download.AaxImporter
 
     override fun onCreate() {
         super.onCreate()
@@ -31,6 +32,8 @@ class AudiobookApp : Application(), Configuration.Provider {
         backgroundWork.startWatching()
         // Pending downloads (Audible's download limit) are retried by WorkManager
         downloadManager.scheduleRetry()
+        // Books added before files were copied into the app
+        aaxImporter.copyExternalBooks()
     }
 
     override val workManagerConfiguration: Configuration

@@ -159,26 +159,67 @@ class MainViewModel @Inject constructor(
      * book. An image is used as the cover of the books in its folder.
      */
     private fun addFiles(uris: List<Uri>) {
-        // A single file is a book whatever its name says
-        if (uris.size == 1) return importLocalBook(uris[0])
         viewModelScope.launch(Dispatchers.IO) {
             val files = uris.map { PickedFile(it, displayName(it), folderOf(it)) }
+            // A single file is a book whatever its name says
+            if (files.size == 1) return@launch addBook(files, emptyList())
             fun isType(f: PickedFile, exts: List<String>) = exts.any { f.name.endsWith(".$it", ignoreCase = true) }
             val images = files.filter { isType(it, IMAGE_EXTENSIONS) }
-            files.filter { it.name.endsWith(".aax", ignoreCase = true) }.forEach { importLocalBook(it.uri) }
+            files.filter { it.name.endsWith(".aax", ignoreCase = true) }.forEach { addBook(listOf(it), emptyList()) }
             val books = files.filter { isType(it, AUDIO_EXTENSIONS) }.groupBy { f ->
                 metadataExtractor.readAlbum(f.uri)?.let { "album:" + SeriesIndex.normalize(it) } ?: "folder:${f.folder}"
             }.values
             debugLog.log("IMPORT", "Picked ${files.size} files: ${books.size} book(s) of ${books.joinToString { it.size.toString() }} file(s)")
-            for (parts in books) {
-                if (parts.size == 1) {
-                    importLocalBook(parts[0].uri)
-                } else {
-                    val cover = images.filter { it.folder == parts[0].folder }
-                    aaxImporter.importJoined((parts + cover).map { it.uri to it.name })
-                }
-            }
+            for (parts in books) addBook(parts, images.filter { it.folder == parts[0].folder })
         }
+    }
+
+    /**
+     * Adds one book, copied into the app: a .aax file, a single audio file, or several joined.
+     * If the library already has a book with that title and author, asks whether to replace
+     * it, since only one copy should exist.
+     */
+    private suspend fun addBook(parts: List<PickedFile>, cover: List<PickedFile>) {
+        val first = parts[0]
+        try {
+            // Matched to the Audible library, which turns away a book already downloaded
+            if (first.name.endsWith(".aax", ignoreCase = true)) return aaxImporter.import(first.uri, first.name)
+            val (tagTitle, author) = metadataExtractor.readTitleAuthor(first.uri)
+            // A book in several files is named by its album tag; its title tags name chapters
+            val title = (if (parts.size > 1) metadataExtractor.readAlbum(first.uri) else tagTitle)
+                ?: first.name.substringBeforeLast('.')
+            val existing = bookRepository.getAllBooksOnce().firstOrNull {
+                SeriesIndex.normalize(it.title) == SeriesIndex.normalize(title) &&
+                    (author == null || SeriesIndex.normalize(it.author) == SeriesIndex.normalize(author))
+            }
+            if (existing != null && !askReplace(existing.title)) {
+                debugLog.log("IMPORT", "Not added: \"$title\" is already in the library")
+                return
+            }
+            if (parts.size == 1) {
+                aaxImporter.importCopy(first.uri, first.name, replaces = existing?.id)
+            } else {
+                aaxImporter.importJoined((parts + cover).map { it.uri to it.name }, replaces = existing?.id)
+            }
+        } catch (e: Exception) {
+            _importError.value = "Failed to import: ${e.message}"
+        }
+    }
+
+    /** Asks whether to replace a book already in the library; null when nothing is being asked. */
+    data class DuplicatePrompt(val title: String, val answer: kotlinx.coroutines.CompletableDeferred<Boolean>)
+
+    private val _duplicatePrompt = MutableStateFlow<DuplicatePrompt?>(null)
+    val duplicatePrompt: StateFlow<DuplicatePrompt?> = _duplicatePrompt.asStateFlow()
+
+    private suspend fun askReplace(title: String): Boolean {
+        val prompt = DuplicatePrompt(title, kotlinx.coroutines.CompletableDeferred())
+        _duplicatePrompt.value = prompt
+        return prompt.answer.await().also { _duplicatePrompt.value = null }
+    }
+
+    fun answerDuplicate(replace: Boolean) {
+        _duplicatePrompt.value?.answer?.complete(replace)
     }
 
     private class PickedFile(val uri: Uri, val name: String, val folder: String)
@@ -190,22 +231,7 @@ class MainViewModel @Inject constructor(
         ""
     }
 
-    fun importLocalBook(uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val name = displayName(uri)
-                if (name.endsWith(".aax", ignoreCase = true)) {
-                    // Copied into the app, converted, and matched to the Audible library
-                    aaxImporter.import(uri, name)
-                    return@launch
-                }
-                // Copied into the app, so it plays without the drive or folder it came from
-                aaxImporter.importCopy(uri, name)
-            } catch (e: Exception) {
-                _importError.value = "Failed to import: ${e.message}"
-            }
-        }
-    }
+    fun importLocalBook(uri: Uri) = addFiles(listOf(uri))
 
     private fun displayName(uri: Uri): String {
         context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)

@@ -86,11 +86,11 @@ class AaxImporter @Inject constructor(
      * Copies a single audio file into the app, so the book keeps playing when the drive or
      * folder it came from is gone, and adds it to the library. The original is left as is.
      */
-    fun importCopy(uri: Uri, displayName: String) {
-        scope.launch { mutex.withLock { runCopy(uri, displayName) } }
+    fun importCopy(uri: Uri, displayName: String, replaces: Long? = null) {
+        scope.launch { mutex.withLock { runCopy(uri, displayName, replaces) } }
     }
 
-    private suspend fun runCopy(uri: Uri, displayName: String) {
+    private suspend fun runCopy(uri: Uri, displayName: String, replaces: Long?) {
         var title = displayName.substringBeforeLast('.')
         debugLog.section("Import file: $displayName")
         var lastProgressAt = 0L
@@ -114,16 +114,103 @@ class AaxImporter @Inject constructor(
             val metadata = metadataExtractor.extract(fileUri)
             // Untagged files are named after the original file, not the app's copy
             title = metadata.title.takeUnless { it == dest.nameWithoutExtension } ?: title
-            bookRepository.insertBook(
-                metadataExtractor.toBookEntity(fileUri, metadata).copy(title = title),
-                metadataExtractor.toChapterEntities(0, metadata)
-            )
+            val entity = metadataExtractor.toBookEntity(fileUri, metadata).copy(title = title)
+            val id = bookRepository.insertBook(entity, metadataExtractor.toChapterEntities(0, metadata))
             debugLog.log("IMPORT", "Added to library: ${dest.name} ($title)")
+            replace(replaces, id, entity.durationMs)
             seriesRepository.refresh()
             _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
         } catch (e: Exception) {
             fail("${e::class.simpleName}: ${e.message}")
         }
+    }
+
+    /**
+     * Removes the book an import replaces, its file included, once the new copy is in. If
+     * it's the same recording (same length to within 2%), the new copy keeps the old one's
+     * place in the book.
+     */
+    private suspend fun replace(oldId: Long?, newId: Long, newDurationMs: Long) {
+        val old = oldId?.let { bookRepository.getBookById(it) } ?: return
+        val sameRecording = kotlin.math.abs(old.durationMs - newDurationMs) <= maxOf(old.durationMs, newDurationMs) / 50
+        if (sameRecording && old.currentPositionMs > 0) {
+            bookRepository.updatePosition(newId, old.currentPositionMs, old.currentChapterIndex)
+        }
+        bookRepository.deleteBook(old.id)
+        removeFile(old.fileUri)
+        debugLog.log("IMPORT", "Replaced the earlier copy (${old.fileUri.substringAfterLast('/')})${if (sameRecording) ", keeping its place" else ""}")
+    }
+
+    /** Deletes a book's file if it's in the app's storage; for a file elsewhere, lets go of the permission to read it. */
+    private fun removeFile(fileUri: String) {
+        val uri = Uri.parse(fileUri)
+        val appDir = context.getExternalFilesDir(null)?.canonicalPath ?: return
+        val path = uri.path
+        if (uri.scheme == "file" && path != null) {
+            val file = File(path).canonicalFile
+            if (file.path.startsWith(appDir + File.separator)) file.delete()
+        } else if (uri.scheme == "content") {
+            try {
+                context.contentResolver.releasePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e: SecurityException) {
+                // Never persisted
+            }
+        }
+    }
+
+    /**
+     * Books added before files were copied into the app still point to where they were
+     * added from, e.g. a USB drive. Copies each one in when its file can be read; one that
+     * can't (the drive is unplugged) is tried again the next time the app starts.
+     */
+    fun copyExternalBooks() {
+        scope.launch {
+            mutex.withLock {
+                val external = bookRepository.getAllBooksOnce().filter { it.fileUri.startsWith("content://") }
+                if (external.isEmpty()) return@withLock
+                debugLog.section("Copy ${external.size} added book(s) into the app")
+                var copied = 0
+                for (book in external) {
+                    val uri = Uri.parse(book.fileUri)
+                    val ext = displayNameOf(uri)?.substringAfterLast('.', "")?.lowercase()?.ifEmpty { null } ?: "m4b"
+                    val dest = File(audiobooksDir, "import_${System.currentTimeMillis()}.$ext")
+                    var lastProgressAt = 0L
+                    _status.value = AaxImportStatus(book.title, "Copying into the app")
+                    val error = try {
+                        copyFromUri(uri, dest) { fraction ->
+                            val now = System.currentTimeMillis()
+                            if (now - lastProgressAt >= 250 || fraction >= 1f) {
+                                lastProgressAt = now
+                                _status.value = AaxImportStatus(book.title, "Copying into the app", progress = fraction)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.message ?: e::class.simpleName
+                    }
+                    if (error != null) {
+                        dest.delete()
+                        debugLog.log("IMPORT", "Can't copy ${book.title} yet ($error) — trying again next time the app starts")
+                        continue
+                    }
+                    bookRepository.updateFileUri(book.id, Uri.fromFile(dest).toString())
+                    removeFile(book.fileUri)
+                    debugLog.log("IMPORT", "Copied ${book.title} into the app: ${dest.name}, ${dest.length() / 1_048_576}MB")
+                    copied++
+                }
+                _status.value = if (copied > 0) {
+                    AaxImportStatus("", "Copied $copied book${if (copied == 1) "" else "s"} into the app", finished = true)
+                } else {
+                    null
+                }
+            }
+        }
+    }
+
+    private fun displayNameOf(uri: Uri): String? = try {
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { if (it.moveToFirst()) it.getString(0) else null }
+    } catch (e: Exception) {
+        null
     }
 
     /**
@@ -162,11 +249,11 @@ class AaxImporter @Inject constructor(
      * among [files] (uri to file name) are skipped; an image among them is the cover when
      * the files have none.
      */
-    fun importJoined(files: List<Pair<Uri, String>>) {
-        scope.launch { mutex.withLock { runJoin(files) } }
+    fun importJoined(files: List<Pair<Uri, String>>, replaces: Long? = null) {
+        scope.launch { mutex.withLock { runJoin(files, replaces) } }
     }
 
-    private suspend fun runJoin(files: List<Pair<Uri, String>>) {
+    private suspend fun runJoin(files: List<Pair<Uri, String>>, replaces: Long?) {
         fun ext(name: String) = name.substringAfterLast('.', "").lowercase()
         // Natural order, so "2-…" comes before "10-…"
         val byName = compareBy<Pair<Uri, String>> { (_, name) -> name.lowercase().replace(Regex("\\d+")) { it.value.padStart(10, '0') } }
@@ -250,7 +337,7 @@ class AaxImporter @Inject constructor(
             }
             val cover = saveCover(baseName, image?.first, audio[0].first)
             val asin = metadataExtractor.readAsin(audio[0].first).orEmpty()
-            bookRepository.insertBook(
+            val id = bookRepository.insertBook(
                 BookEntity(
                     title = title,
                     author = author,
@@ -263,6 +350,7 @@ class AaxImporter @Inject constructor(
                 chapters
             )
             debugLog.log("IMPORT", "Added to library: ${dest.name}, ${chapters.size} chapters${if (asin.isNotEmpty()) ", ASIN $asin" else ""}")
+            replace(replaces, id, durationMsOf(dest) ?: offset)
             seriesRepository.refresh()
             _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
         } catch (e: Exception) {

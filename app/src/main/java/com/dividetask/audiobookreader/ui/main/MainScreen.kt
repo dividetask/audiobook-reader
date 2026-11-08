@@ -116,6 +116,7 @@ fun MainScreen(
     val isSyncing by viewModel.isSyncing.collectAsState()
     val importError by viewModel.importError.collectAsState()
     val storageWarning by viewModel.storageWarning.collectAsState()
+    val duplicatePrompt by viewModel.duplicatePrompt.collectAsState()
     val aaxImport by viewModel.aaxImportStatus.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
     val queuedAsins by viewModel.queuedAsins.collectAsState()
@@ -377,6 +378,17 @@ fun MainScreen(
         }
     }
 
+    // The book being added is already in the library: only one copy should exist
+    duplicatePrompt?.let { prompt ->
+        AlertDialog(
+            onDismissRequest = { viewModel.answerDuplicate(false) },
+            title = { Text("Already in your library") },
+            text = { Text("\"${prompt.title}\" is already in your library. Replace it with this file?") },
+            confirmButton = { TextButton(onClick = { viewModel.answerDuplicate(true) }) { Text("Replace") } },
+            dismissButton = { TextButton(onClick = { viewModel.answerDuplicate(false) }) { Text("Cancel") } }
+        )
+    }
+
     // Adding a book would leave the phone nearly full
     storageWarning?.let { warning ->
         AlertDialog(
@@ -413,7 +425,7 @@ fun MainScreen(
             onDismissRequest = { bookToDelete = null },
             title = { Text("Remove Book") },
             text = {
-                Text("Remove \"${book.title}\" from your library? Files the app downloaded or imported are deleted; files you added from your phone are kept.")
+                Text("Remove \"${book.title}\" from your library? The app's copy of its file is deleted; the original you added it from is kept.")
             },
             confirmButton = {
                 TextButton(onClick = {
