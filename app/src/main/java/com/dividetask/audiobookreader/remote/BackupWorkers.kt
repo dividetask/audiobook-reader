@@ -9,7 +9,11 @@ import androidx.work.WorkerParameters
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 
-/** Backs up Audible books. Input [KEY_SINGLE] = true does just one book ("Back up now"). */
+/**
+ * Runs one backup pass. [KEY_MODE] = [MODE_LOCAL] uploads every book on the phone
+ * that isn't on the server; [MODE_AUDIBLE] downloads, converts and uploads the next
+ * Audible book (one at a time, to stay clear of Audible's download limit).
+ */
 @HiltWorker
 class BackupWorker @AssistedInject constructor(
     @Assisted context: Context,
@@ -18,7 +22,7 @@ class BackupWorker @AssistedInject constructor(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        val single = inputData.getBoolean(KEY_SINGLE, false)
+        val local = inputData.getString(KEY_MODE) == MODE_LOCAL
         try {
             setForeground(engine.foregroundInfo())
         } catch (e: Exception) {
@@ -26,20 +30,23 @@ class BackupWorker @AssistedInject constructor(
             // The work still runs; if stopped, it resumes from partial files next time.
             Log.w("BackupWorker", "Could not run in foreground: ${e.message}")
         }
-        return when (val outcome = engine.run(if (single) 1 else Int.MAX_VALUE)) {
+        val outcome = if (local) engine.runLocal() else engine.runAudible(maxBooks = 1)
+        return when (outcome) {
             BackupOutcome.AllDone, BackupOutcome.MoreRemaining -> Result.success()
-            is BackupOutcome.Failed -> if (outcome.retry && !single) Result.retry() else Result.failure()
+            is BackupOutcome.Failed -> if (outcome.retry && local) Result.retry() else Result.failure()
         }
     }
 
     override suspend fun getForegroundInfo(): ForegroundInfo = engine.foregroundInfo()
 
     companion object {
-        const val KEY_SINGLE = "single"
+        const val KEY_MODE = "mode"
+        const val MODE_LOCAL = "local"
+        const val MODE_AUDIBLE = "audible"
     }
 }
 
-/** Runs on the daily/weekly/monthly schedule and queues a full backup pass. */
+/** Runs on the day/week/month schedule and queues the next Audible book. */
 @HiltWorker
 class BackupCheckWorker @AssistedInject constructor(
     @Assisted context: Context,
@@ -47,7 +54,7 @@ class BackupCheckWorker @AssistedInject constructor(
     private val scheduler: BackupScheduler
 ) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
-        scheduler.enqueueFullBackup()
+        scheduler.enqueueAudibleBackup()
         return Result.success()
     }
 }

@@ -17,6 +17,7 @@ class AudiobookApp : Application(), Configuration.Provider {
     @Inject lateinit var downloadManager: AudibleDownloadManager
     @Inject lateinit var debugLog: AppDebugLog
     @Inject lateinit var aaxImporter: com.dividetask.audiobookreader.audible.download.AaxImporter
+    @Inject lateinit var backupScheduler: com.dividetask.audiobookreader.remote.BackupScheduler
 
     override fun onCreate() {
         super.onCreate()
@@ -34,6 +35,8 @@ class AudiobookApp : Application(), Configuration.Provider {
         downloadManager.scheduleRetry()
         // Books added before files were copied into the app
         aaxImporter.copyExternalBooks()
+        // Server backup: upload phone copies on WiFi, schedule Audible downloads
+        backupScheduler.start()
     }
 
     override val workManagerConfiguration: Configuration

@@ -78,7 +78,9 @@ class ServerSettingsViewModel @Inject constructor(
     val status = engine.status
     val backupNowPending = scheduler.backupNowPending
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
-    val fullBackupState = scheduler.fullBackupState
+    val audibleBackupState = scheduler.audibleBackupState
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+    val localBackupState = scheduler.localBackupState
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     val lastRun: String
@@ -162,7 +164,8 @@ class ServerSettingsViewModel @Inject constructor(
 fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) {
     val status by viewModel.status.collectAsState()
     val backupNowPending by viewModel.backupNowPending.collectAsState()
-    val fullBackupState by viewModel.fullBackupState.collectAsState()
+    val audibleBackupState by viewModel.audibleBackupState.collectAsState()
+    val localBackupState by viewModel.localBackupState.collectAsState()
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
 
     Text("Server (SFTP)", style = MaterialTheme.typography.titleMedium)
@@ -241,23 +244,27 @@ fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = viewModel.backupEnabled, onCheckedChange = { viewModel.updateBackupEnabled(it) })
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Back up Audible books to server", style = MaterialTheme.typography.bodyMedium)
-                    Text("Downloads, converts and uploads one book at a time, then deletes the phone copy. " +
-                        "Runs only on WiFi while charging and idle.",
+                    Text("Back up books to server", style = MaterialTheme.typography.bodyMedium)
+                    Text("Books on this phone are uploaded whenever you're on WiFi. Audible books that aren't on " +
+                        "the phone are downloaded, converted and uploaded one at a time on WiFi while charging " +
+                        "and idle, then the phone copy is deleted.",
                         style = MaterialTheme.typography.bodySmall, color = muted)
                 }
             }
             if (viewModel.backupEnabled) {
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("Check for new books", style = MaterialTheme.typography.bodyMedium)
+                Text("Download one Audible book per", style = MaterialTheme.typography.bodyMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     BackupFrequency.entries.forEach { f ->
                         FilterChip(selected = viewModel.frequency == f, onClick = { viewModel.updateFrequency(f) },
                             label = { Text(f.label) })
                     }
                 }
-                if (fullBackupState == WorkInfo.State.ENQUEUED) {
-                    Text("Backup pending — waiting for WiFi, charging and idle",
+                if (localBackupState == WorkInfo.State.ENQUEUED) {
+                    Text("Phone copies waiting for WiFi", style = MaterialTheme.typography.bodySmall, color = muted)
+                }
+                if (audibleBackupState == WorkInfo.State.ENQUEUED) {
+                    Text("Next Audible book waiting for WiFi, charging and idle",
                         style = MaterialTheme.typography.bodySmall, color = muted)
                 }
             }
@@ -270,7 +277,7 @@ fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) 
             } else {
                 Button(onClick = { viewModel.backupNow() }, enabled = !backupNowPending && status.phase == BackupPhase.IDLE,
                     modifier = Modifier.fillMaxWidth()) {
-                    Text("Back up one book now")
+                    Text("Back up next Audible book now")
                 }
             }
 
@@ -285,7 +292,7 @@ fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) 
                 Text(if (action.isEmpty()) status.title else "$action: ${status.title}",
                     style = MaterialTheme.typography.bodySmall)
                 if (status.remaining > 0) {
-                    Text("${status.remaining} books left to back up", style = MaterialTheme.typography.bodySmall, color = muted)
+                    Text("${status.remaining} books left", style = MaterialTheme.typography.bodySmall, color = muted)
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 if (status.total > 0) {

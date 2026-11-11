@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.StatFs
 import androidx.core.app.NotificationCompat
@@ -15,6 +16,8 @@ import com.dividetask.audiobookreader.audible.auth.AudibleTokenStore
 import com.dividetask.audiobookreader.audible.download.AaxConverter
 import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.data.db.entity.AudibleBookEntity
+import com.dividetask.audiobookreader.data.db.entity.BookEntity
+import com.dividetask.audiobookreader.data.repository.BookRepository
 import com.dividetask.audiobookreader.data.series.SeriesRepository
 import com.dividetask.audiobookreader.debug.AppDebugLog
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -60,9 +63,10 @@ sealed class BackupOutcome {
 }
 
 /**
- * Backs up Audible books to the SFTP server, one book at a time:
- * download AAX → convert → upload → delete local copy.
- * Books already in the local library are uploaded from there and kept.
+ * Backs up books to the SFTP server in two passes:
+ * - phone copies: every book on the phone not yet on the server is uploaded (and kept);
+ * - Audible: books not on the phone are downloaded → converted → uploaded → the
+ *   phone copy deleted, one at a time.
  */
 @Singleton
 class BackupEngine @Inject constructor(
@@ -76,6 +80,7 @@ class BackupEngine @Inject constructor(
     private val audibleBookDao: AudibleBookDao,
     private val tokenStore: AudibleTokenStore,
     private val seriesRepository: SeriesRepository,
+    private val bookRepository: BookRepository,
     private val debugLog: AppDebugLog
 ) {
     private val mutex = Mutex()
@@ -87,8 +92,9 @@ class BackupEngine @Inject constructor(
     private val workDir: File
         get() = File(context.getExternalFilesDir(null), "backup_work").apply { mkdirs() }
 
-    private val libraryDir: File
-        get() = File(context.getExternalFilesDir(null), "audiobooks")
+    /** Where the Server tab saves downloads; those are already on the server. */
+    private val serverDownloadsDir: File
+        get() = File(context.getExternalFilesDir(null), "remote_books")
 
     init {
         notificationManager.createNotificationChannel(
@@ -96,10 +102,16 @@ class BackupEngine @Inject constructor(
         )
     }
 
-    suspend fun run(maxBooks: Int): BackupOutcome = mutex.withLock {
+    /** Uploads every book on the phone that isn't on the server yet. Never contacts Audible. */
+    suspend fun runLocal(): BackupOutcome = locked { runLocalLocked() }
+
+    /** Downloads, converts and uploads up to [maxBooks] Audible books that aren't on the phone or server. */
+    suspend fun runAudible(maxBooks: Int): BackupOutcome = locked { runAudibleLocked(maxBooks) }
+
+    private suspend fun locked(block: suspend () -> BackupOutcome): BackupOutcome = mutex.withLock {
         withContext(Dispatchers.IO) {
             try {
-                runLocked(maxBooks)
+                block()
             } finally {
                 _status.value = BackupStatus()
                 notificationManager.cancel(NOTIFICATION_ID)
@@ -107,8 +119,86 @@ class BackupEngine @Inject constructor(
         }
     }
 
-    private suspend fun runLocked(maxBooks: Int): BackupOutcome {
-        debugLog.section("Server Backup")
+    /** A book on the phone, the file to upload, and where it goes on the server. */
+    private data class LocalCopy(val book: BookEntity, val file: File, val remoteBase: String, val asin: String?)
+
+    /**
+     * Books in the library whose file is on the phone. Files that came from the
+     * server and AAX files (still DRM-protected) are left out.
+     */
+    private suspend fun localCopies(audibleByAsin: Map<String, AudibleBookEntity>): List<LocalCopy> {
+        var outside = 0
+        val copies = bookRepository.getAllBooksOnce().mapNotNull { book ->
+            val uri = Uri.parse(book.fileUri)
+            if (uri.scheme != "file") { outside++; return@mapNotNull null }
+            val file = File(uri.path ?: return@mapNotNull null)
+            if (!file.exists() || file.length() < 1000 || file.extension.equals("aax", true)) return@mapNotNull null
+            if (file.absolutePath.startsWith(serverDownloadsDir.absolutePath)) return@mapNotNull null
+            val asin = book.asin?.takeIf { it.isNotEmpty() }
+                ?: file.nameWithoutExtension.takeIf { it in audibleByAsin }
+            // Audible books use the Audible title/author, so both passes agree on the name
+            val base = asin?.let { audibleByAsin[it] }?.let { remoteBase(it) }
+                ?: "${safeName(book.author)}/${safeName(book.title)}"
+            LocalCopy(book, file, base, asin)
+        }
+        if (outside > 0) debugLog.log("BACKUP", "$outside book(s) stored outside the app can't be backed up")
+        return copies
+    }
+
+    private fun serverPaths(): Set<String> =
+        sftp.use { conn -> conn.listAudio() }.map { it.relPath.substringBeforeLast('.').lowercase() }.toSet()
+
+    private suspend fun runLocalLocked(): BackupOutcome {
+        debugLog.section("Server Backup (phone copies)")
+        if (!settings.isConfigured) return finish(BackupOutcome.Failed("Server not set up", retry = false))
+        setStatus(BackupStatus(BackupPhase.CHECKING, "Checking phone copies"))
+
+        val audibleByAsin = audibleBookDao.getAllOnce().associateBy { it.asin }
+        var done = 0
+        var failed = 0
+        val tried = mutableSetOf<Long>()
+        // Books added while uploading are picked up by the next round
+        while (true) {
+            val onServer = try {
+                serverPaths()
+            } catch (e: ServerException) {
+                return finish(BackupOutcome.Failed(e.message ?: "Server error", retry = true), prefix = "Phone copies")
+            }
+            val failures = settings.failures
+            val pending = localCopies(audibleByAsin).filter {
+                it.book.id !in tried && it.remoteBase.lowercase() !in onServer &&
+                    (failures[localKey(it.book)] ?: 0) < MAX_FAILURES
+            }
+            if (pending.isEmpty()) break
+            debugLog.log("BACKUP", "${pending.size} phone copies to upload")
+            for ((i, copy) in pending.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                tried += copy.book.id
+                val key = localKey(copy.book)
+                try {
+                    upload(copy.file, copy.remoteBase, copy.book.title, pending.size - i)
+                    done++
+                    settings.failures = settings.failures - key
+                    debugLog.log("BACKUP", "Uploaded: ${copy.book.title}")
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    failed++
+                    val count = (settings.failures[key] ?: 0) + 1
+                    settings.failures = settings.failures + (key to count)
+                    debugLog.log("BACKUP", "Failed (${count}/$MAX_FAILURES): ${copy.book.title} — ${e::class.simpleName}: ${e.message}")
+                    if (e is ServerException) {
+                        return finish(BackupOutcome.Failed(e.message ?: "Server error", retry = true), prefix = "Phone copies")
+                    }
+                }
+            }
+        }
+        if (done == 0 && failed == 0) return finish(BackupOutcome.AllDone, "all on server", prefix = "Phone copies")
+        return finish(BackupOutcome.AllDone,
+            "uploaded $done" + (if (failed > 0) ", $failed failed" else ""), prefix = "Phone copies")
+    }
+
+    private suspend fun runAudibleLocked(maxBooks: Int): BackupOutcome {
+        debugLog.section("Server Backup (Audible)")
         if (!settings.isConfigured) return finish(BackupOutcome.Failed("Server not set up", retry = false))
         if (!tokenStore.isAuthenticated) return finish(BackupOutcome.Failed("Not signed in to Audible", retry = false))
 
@@ -128,19 +218,21 @@ class BackupEngine @Inject constructor(
             debugLog.log("BACKUP", "Library refresh failed, using cached list: ${e.message}")
         }
         val library = audibleBookDao.getAllOnce()
+        // Books already on the phone are uploaded by the phone-copies pass instead
+        val onPhone = localCopies(library.associateBy { it.asin }).mapNotNull { it.asin }.toSet()
 
         val onServer = try {
-            sftp.use { conn -> conn.listAudio() }.map { it.relPath.substringBeforeLast('.').lowercase() }.toSet()
+            serverPaths()
         } catch (e: ServerException) {
-            return finish(BackupOutcome.Failed(e.message ?: "Server error", retry = true))
+            return finish(BackupOutcome.Failed(e.message ?: "Server error", retry = true), prefix = "Audible")
         }
 
         val failures = settings.failures
         val pending = library.filter {
-            remoteBase(it).lowercase() !in onServer && (failures[it.asin] ?: 0) < MAX_FAILURES
+            it.asin !in onPhone && remoteBase(it).lowercase() !in onServer && (failures[it.asin] ?: 0) < MAX_FAILURES
         }
-        debugLog.log("BACKUP", "${library.size} Audible books, ${library.size - pending.size} on server or skipped, ${pending.size} to back up")
-        if (pending.isEmpty()) return finish(BackupOutcome.AllDone, "Up to date — ${library.size} books checked")
+        debugLog.log("BACKUP", "${library.size} Audible books, ${onPhone.size} on phone, ${pending.size} to download and back up")
+        if (pending.isEmpty()) return finish(BackupOutcome.AllDone, "nothing left to download", prefix = "Audible")
 
         var done = 0
         var failed = 0
@@ -156,47 +248,34 @@ class BackupEngine @Inject constructor(
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 if (e is AudibleThrottledException) {
-                    return finish(BackupOutcome.Failed(e.message ?: "Throttled by Audible", retry = true))
+                    return finish(BackupOutcome.Failed(e.message ?: "Throttled by Audible", retry = true), prefix = "Audible")
                 }
                 failed++
                 val count = (settings.failures[book.asin] ?: 0) + 1
                 settings.failures = settings.failures + (book.asin to count)
                 debugLog.log("BACKUP", "Failed (${count}/$MAX_FAILURES): ${book.title} — ${e::class.simpleName}: ${e.message}")
-                if (maxBooks == 1) {
-                    return finish(BackupOutcome.Failed("${book.title}: ${e.message}", retry = e is IOException))
-                }
-                if (e is ServerException) {
-                    // Server went away — stop and let WorkManager try again later
-                    return finish(BackupOutcome.Failed(e.message ?: "Server error", retry = true))
-                }
+                // One download per run: a failure uses up this run rather than starting another book
+                return finish(BackupOutcome.Failed("${book.title}: ${e.message}", retry = e is IOException), prefix = "Audible")
             }
         }
 
         val left = pending.size - done - failed
-        val summary = "Backed up $done book${if (done == 1) "" else "s"}" +
-            (if (failed > 0) ", $failed failed" else "") +
-            (if (left > 0) ", $left remaining" else "")
-        return finish(if (left > 0) BackupOutcome.MoreRemaining else BackupOutcome.AllDone, summary)
+        val summary = "backed up $done book${if (done == 1) "" else "s"}" + (if (left > 0) ", $left remaining" else "")
+        return finish(if (left > 0) BackupOutcome.MoreRemaining else BackupOutcome.AllDone, summary, prefix = "Audible")
     }
 
-    private fun finish(outcome: BackupOutcome, message: String? = null): BackupOutcome {
+    private fun localKey(book: BookEntity) = "book:${book.id}"
+
+    private fun finish(outcome: BackupOutcome, message: String? = null, prefix: String? = null): BackupOutcome {
+        val text = message ?: (outcome as? BackupOutcome.Failed)?.message ?: ""
         settings.lastRunAt = System.currentTimeMillis()
-        settings.lastRunMessage = message ?: (outcome as? BackupOutcome.Failed)?.message ?: ""
+        settings.lastRunMessage = if (prefix != null) "$prefix: $text" else text
         debugLog.log("BACKUP", settings.lastRunMessage)
         return outcome
     }
 
     private suspend fun backUpBook(book: AudibleBookEntity, remaining: Int) {
         val title = book.title
-        val existing = AUDIO_EXTENSIONS.map { File(libraryDir, "${book.asin}.$it") }
-            .firstOrNull { it.exists() && !it.name.endsWith(".aax") && it.length() > 1000 }
-
-        if (existing != null) {
-            debugLog.log("BACKUP", "Uploading from local library: ${existing.name}")
-            upload(existing, book, remaining)
-            return
-        }
-
         val estimate = (book.runtimeMinutes ?: 500) * 1_000_000L
         val free = StatFs(workDir.absolutePath).availableBytes
         if (free < estimate * 2 + 200_000_000L) {
@@ -230,22 +309,22 @@ class BackupEngine @Inject constructor(
             out
         }
 
-        upload(output, book, remaining)
+        upload(output, remoteBase(book), title, remaining)
         output.delete()
         aax.delete()
     }
 
-    private suspend fun upload(file: File, book: AudibleBookEntity, remaining: Int) {
-        val rel = "${remoteBase(book)}.${file.extension}"
+    private suspend fun upload(file: File, remoteBase: String, title: String, remaining: Int) {
+        val rel = "$remoteBase.${file.extension}"
         val ctx = currentCoroutineContext()
-        setStatus(BackupStatus(BackupPhase.UPLOADING, book.title, 0, file.length(), remaining))
+        setStatus(BackupStatus(BackupPhase.UPLOADING, title, 0, file.length(), remaining))
         var lastUpdate = 0L
         sftp.use { conn ->
             conn.upload(file, rel) { done, total ->
                 val now = System.currentTimeMillis()
                 if (now - lastUpdate > 1000) {
                     lastUpdate = now
-                    setStatus(BackupStatus(BackupPhase.UPLOADING, book.title, done, total, remaining))
+                    setStatus(BackupStatus(BackupPhase.UPLOADING, title, done, total, remaining))
                 }
                 ctx.isActive
             }

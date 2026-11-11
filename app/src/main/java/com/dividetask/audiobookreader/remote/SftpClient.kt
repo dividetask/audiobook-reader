@@ -81,16 +81,22 @@ class SftpClient @Inject constructor(
                 channel.disconnect()
             }
         } catch (e: ServerException) {
-            throw e
+            throw logged(e)
         } catch (e: JSchChangedHostKeyException) {
-            throw ServerException("Server key changed — if you reinstalled the server, tap \"Forget server key\" in Settings", e)
+            throw logged(ServerException("Server key changed — if you reinstalled the server, tap \"Forget server key\" in Settings", e))
         } catch (e: JSchException) {
-            throw ServerException(describe(e), e)
+            throw logged(ServerException(describe(e), e))
         } catch (e: SftpException) {
-            throw ServerException("SFTP error: ${e.message}", e)
+            throw logged(ServerException("SFTP error: ${e.message}", e))
         } finally {
             session.disconnect()
         }
+    }
+
+    /** Connection errors are otherwise shown only on screen, so record them in the debug log. */
+    private fun logged(e: ServerException): ServerException {
+        debugLog.log("SFTP", "Failed: ${e.message}")
+        return e
     }
 
     private fun resolveRoot(home: String, folder: String): String {

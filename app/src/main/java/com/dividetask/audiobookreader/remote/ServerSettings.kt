@@ -11,7 +11,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 enum class BackupFrequency(val label: String, val days: Long) {
-    DAILY("Daily", 1), WEEKLY("Weekly", 7), MONTHLY("Monthly", 30)
+    DAILY("Day", 1), WEEKLY("Week", 7), MONTHLY("Month", 30)
 }
 
 /** SFTP server connection details and backup preferences (encrypted at rest). */
