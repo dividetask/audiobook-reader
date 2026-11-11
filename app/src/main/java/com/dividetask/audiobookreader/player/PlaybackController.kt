@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import com.dividetask.audiobookreader.data.db.entity.BookEntity
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -58,6 +59,33 @@ class PlaybackController @Inject constructor(
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
     private var connecting = false
+
+    /**
+     * The last-played book shown in the mini player after the app restarts, before
+     * anything is loaded into the player. Play loads it at its saved position.
+     */
+    private var restored: BookEntity? = null
+    private var playRestoredWhenConnected = false
+
+    /** Shows [book] in the mini player (not playing) if nothing else is loaded. */
+    fun restoreLastBook(book: BookEntity) {
+        if (_playbackState.value.bookId >= 0 || player?.currentMediaItem != null) return
+        restored = book
+        _playbackState.value = PlaybackState(
+            bookId = book.id,
+            currentPositionMs = book.currentPositionMs,
+            durationMs = book.durationMs,
+            title = book.title,
+            author = book.author
+        )
+        debugLog.log("PLAY", "Restored last book: ${book.title} at ${book.currentPositionMs / 1000}s")
+    }
+
+    private fun playRestored(): Boolean {
+        val book = restored ?: return false
+        play(book.id, book.fileUri, book.title, book.author, book.coverUri, book.currentPositionMs)
+        return true
+    }
 
     fun connect() {
         // Opening the player again must not add a second controller (and listener)
@@ -119,6 +147,10 @@ class PlaybackController @Inject constructor(
                 }
             })
             updateState()
+            if (playRestoredWhenConnected) {
+                playRestoredWhenConnected = false
+                playRestored()
+            }
         }, MoreExecutors.directExecutor())
     }
 
@@ -140,6 +172,7 @@ class PlaybackController @Inject constructor(
         val file = java.io.File(Uri.parse(fileUri).path ?: "")
         debugLog.log("PLAY", "File exists: ${file.exists()}, size: ${file.length() / 1_048_576}MB")
 
+        restored = null
         _playbackState.value = _playbackState.value.copy(bookId = bookId)
 
         val metadata = MediaMetadata.Builder()
@@ -181,7 +214,19 @@ class PlaybackController @Inject constructor(
     }
 
     fun togglePlayPause() {
-        val controller = mediaController ?: return
+        val controller = mediaController ?: run {
+            // After a restart the player isn't connected yet: connect, then play the restored book
+            if (restored != null) {
+                debugLog.log("USER", "Play tapped (restored book)")
+                playRestoredWhenConnected = true
+                connect()
+            }
+            return
+        }
+        if (controller.currentMediaItem == null && playRestored()) {
+            debugLog.log("USER", "Play tapped (restored book)")
+            return
+        }
         if (controller.isPlaying) {
             debugLog.log("USER", "Pause tapped")
             controller.pause()
@@ -224,6 +269,8 @@ class PlaybackController @Inject constructor(
     fun updateState() {
         if (mediaController == null) return
         val player = player ?: return
+        // Nothing loaded yet: keep showing the restored book
+        if (player.currentMediaItem == null && restored != null) return
         _playbackState.value = _playbackState.value.copy(
             isPlaying = player.isPlaying,
             currentPositionMs = player.currentPosition,
