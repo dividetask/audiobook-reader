@@ -27,6 +27,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.Context
 import android.content.Intent
 import kotlinx.coroutines.Dispatchers
+import com.dividetask.audiobookreader.remote.BackupPhase
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -51,8 +52,31 @@ class MainViewModel @Inject constructor(
     private val sortPreferences: ListSortPreferences,
     val playbackController: com.dividetask.audiobookreader.player.PlaybackController,
     private val debugLog: AppDebugLog,
+    backupEngine: com.dividetask.audiobookreader.remote.BackupEngine,
+    remoteLibrary: com.dividetask.audiobookreader.remote.RemoteLibraryManager,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
+
+    /** Background work not shown elsewhere on the Library tab: server backup and server downloads. */
+    val backgroundActivity: StateFlow<List<BackgroundActivity>> =
+        combine(backupEngine.status, remoteLibrary.downloads) { backup, downloads ->
+            val backupLine = backup.takeIf { it.phase != BackupPhase.IDLE }?.let { b ->
+                val action = when (b.phase) {
+                    BackupPhase.CHECKING -> "Server backup — checking"
+                    BackupPhase.DOWNLOADING -> "Server backup — downloading from Audible"
+                    BackupPhase.CONVERTING -> "Server backup — converting"
+                    BackupPhase.UPLOADING -> "Server backup — uploading"
+                    BackupPhase.IDLE -> ""
+                }
+                val left = if (b.remaining > 1) " · ${b.remaining - 1} more to back up" else ""
+                BackgroundActivity("backup", b.title, action + left,
+                    if (b.total > 0) b.bytes.toFloat() / b.total else null)
+            }
+            listOfNotNull(backupLine) + downloads.map { (path, d) ->
+                BackgroundActivity("server_$path", path.substringAfterLast('/').substringBeforeLast('.'),
+                    if (d.fraction == null) "Queued download from server" else "Downloading from server", d.fraction)
+            }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val localBooks: StateFlow<List<BookEntity>> = bookRepository.getAllBooks()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -550,3 +574,6 @@ class MainViewModel @Inject constructor(
         const val FULL_WARNING = 0.9
     }
 }
+
+/** One line of background work shown at the top of the Library tab; [progress] null = indeterminate. */
+data class BackgroundActivity(val key: String, val title: String, val detail: String, val progress: Float?)

@@ -119,6 +119,7 @@ fun MainScreen(
     val duplicatePrompt by viewModel.duplicatePrompt.collectAsState()
     val aaxImport by viewModel.aaxImportStatus.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
+    val backgroundActivity by viewModel.backgroundActivity.collectAsState()
     val queuedAsins by viewModel.queuedAsins.collectAsState()
     val pendingDownloads by viewModel.pendingDownloads.collectAsState()
     val websiteOffer by viewModel.websiteOffer.collectAsState()
@@ -306,7 +307,8 @@ fun MainScreen(
                             .filter { matchesSearch(searchQuery, it.title, it.author) }
                             .sortedBy { it.nextAttemptAt },
                         onPendingWebsite = onWebsiteDownload,
-                        onPendingCancel = { viewModel.removePending(it) }
+                        onPendingCancel = { viewModel.removePending(it) },
+                        backgroundActivity = backgroundActivity
                     )
                     1 -> {
                         if (!viewModel.isAudibleAuthenticated) {
@@ -495,7 +497,9 @@ private fun LocalBooksList(
     /** Books Audible's download limit turned away, waiting for an automatic retry. */
     pending: List<PendingDownload> = emptyList(),
     onPendingWebsite: (asin: String) -> Unit = {},
-    onPendingCancel: (asin: String) -> Unit = {}
+    onPendingCancel: (asin: String) -> Unit = {},
+    /** Server backup and server downloads, shown with the Audible downloads. */
+    backgroundActivity: List<BackgroundActivity> = emptyList()
 ) {
     val entries = remember(books, seriesIndex, sortOrder) {
         val order = when (sortOrder) {
@@ -514,7 +518,8 @@ private fun LocalBooksList(
         ?.takeIf { it.asin !in inSeries || it.state == DownloadState.CONVERTING }
     val queuedHere = queuedAsins.filter { it !in inSeries }
     val waiting = pending.filter { it.asin != downloadProgress?.asin && it.asin !in queuedAsins && it.asin !in inSeries }
-    val hasDownloads = activeDownload != null || queuedHere.isNotEmpty() || waiting.isNotEmpty()
+    val hasDownloads = activeDownload != null || queuedHere.isNotEmpty() || waiting.isNotEmpty() ||
+        backgroundActivity.isNotEmpty()
 
     if (books.isEmpty() && !hasDownloads) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -535,6 +540,7 @@ private fun LocalBooksList(
         ) {
             item(key = "sort") { SortMenu(SortTab.LIBRARY, sortOrder, onSortChange) }
             if (hasDownloads) {
+                items(backgroundActivity, key = { "bg_${it.key}" }) { BackgroundActivityItem(it) }
                 activeDownload?.let { progress ->
                     item(key = "dl_${progress.asin}") {
                         DownloadingBookItem(
@@ -630,6 +636,29 @@ private fun PendingBookItem(
             }
             IconButton(onClick = onCancel) {
                 Icon(Icons.Default.Close, contentDescription = "Stop retrying")
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundActivityItem(activity: BackgroundActivity) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(activity.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val percent = activity.progress?.let { " — ${(it * 100).toInt()}%" } ?: ""
+            Text(activity.detail + percent, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(modifier = Modifier.height(4.dp))
+            val fraction = activity.progress
+            if (fraction != null) {
+                LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
         }
     }
