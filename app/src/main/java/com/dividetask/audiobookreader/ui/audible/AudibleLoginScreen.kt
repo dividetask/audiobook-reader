@@ -41,7 +41,9 @@ fun AudibleLoginScreen(
     serial: String,
     codeVerifier: String,
     onLoginComplete: (LoginCredentials) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    /** Records each page the sign-in browser opens (Audible request log). */
+    onPage: (url: String, status: Int?) -> Unit = { _, _ -> }
 ) {
     val audibleLocale = AudibleEndpoints.getLocale(locale)
     val loginUrl = AudibleEndpoints.loginUrl(audibleLocale, serial, codeVerifier)
@@ -116,6 +118,18 @@ fun AudibleLoginScreen(
                                     }
                                 }
                                 return false
+                            }
+
+                            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                url?.let { onPage(it, null) }
+                            }
+
+                            override fun onReceivedHttpError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                errorResponse: android.webkit.WebResourceResponse?
+                            ) {
+                                if (request?.isForMainFrame == true) onPage(request.url.toString(), errorResponse?.statusCode)
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {

@@ -22,7 +22,8 @@ class AudibleViewModel @Inject constructor(
     private val apiClient: AudibleApiClient,
     private val authManager: AudibleAuthManager,
     private val tokenStore: AudibleTokenStore,
-    private val downloadManager: AudibleDownloadManager
+    private val downloadManager: AudibleDownloadManager,
+    val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog
 ) : ViewModel() {
 
     private val _library = MutableStateFlow<List<AudibleBook>>(emptyList())

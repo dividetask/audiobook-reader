@@ -1,5 +1,6 @@
 package com.dividetask.audiobookreader.di
 
+import com.dividetask.audiobookreader.debug.AudibleRequestLog
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -18,7 +19,7 @@ import javax.inject.Singleton
 object NetworkModule {
     @Provides
     @Singleton
-    fun provideHttpClient(): HttpClient {
+    fun provideHttpClient(requestLog: AudibleRequestLog): HttpClient {
         return HttpClient(OkHttp) {
             install(ContentNegotiation) {
                 json(Json { ignoreUnknownKeys = true })
@@ -34,6 +35,8 @@ object NetworkModule {
                     connectTimeout(30, TimeUnit.SECONDS)
                     readTimeout(120, TimeUnit.SECONDS)
                     writeTimeout(30, TimeUnit.SECONDS)
+                    // Network interceptor: sees every hop, redirects included
+                    addNetworkInterceptor(requestLog.interceptor())
                 }
             }
         }

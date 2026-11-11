@@ -15,6 +15,7 @@ import com.dividetask.audiobookreader.audible.auth.AudibleTokenStore
 import com.dividetask.audiobookreader.audible.download.AaxConverter
 import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.data.db.entity.AudibleBookEntity
+import com.dividetask.audiobookreader.data.series.SeriesRepository
 import com.dividetask.audiobookreader.debug.AppDebugLog
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.ktor.client.HttpClient
@@ -74,6 +75,7 @@ class BackupEngine @Inject constructor(
     private val activationBytesProvider: ActivationBytesProvider,
     private val audibleBookDao: AudibleBookDao,
     private val tokenStore: AudibleTokenStore,
+    private val seriesRepository: SeriesRepository,
     private val debugLog: AppDebugLog
 ) {
     private val mutex = Mutex()
@@ -119,6 +121,7 @@ class BackupEngine @Inject constructor(
                 val entities = books.map { it.toEntity() }
                 audibleBookDao.insertAll(entities)
                 audibleBookDao.deleteNotIn(entities.map { it.asin })
+                seriesRepository.refresh()
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e

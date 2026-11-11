@@ -26,7 +26,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = (System.currentTimeMillis() / 60000).toInt()
-        versionName = "v0.110 a" + if (gitCommit.isNotEmpty()) " ($gitCommit)" else ""
+        versionName = "v0.215 a" + if (gitCommit.isNotEmpty()) " ($gitCommit)" else ""
 
         buildConfigField("long", "BUILD_TIMESTAMP", "${System.currentTimeMillis()}L")
     }
@@ -47,6 +47,13 @@ android {
     buildTypes {
         getByName("debug") {
             signingConfig = signingConfigs.getByName("shared")
+            // The build script ships debug builds, so shrink them too (keep rules in proguard-rules.pro)
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
         release {
             isMinifyEnabled = false
@@ -75,6 +82,9 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
         resources.excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        // Store native libraries (FFmpeg) compressed: a much smaller APK; Android
+        // extracts them at install time
+        jniLibs.useLegacyPackaging = true
     }
 }
 
@@ -113,6 +123,8 @@ dependencies {
     // Networking (Audible API)
     implementation("io.ktor:ktor-client-core:2.3.12")
     implementation("io.ktor:ktor-client-okhttp:2.3.12")
+    // Same OkHttp as Ktor's engine; used directly for the Audible request log interceptor
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.ktor:ktor-client-content-negotiation:2.3.12")
     implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.12")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")

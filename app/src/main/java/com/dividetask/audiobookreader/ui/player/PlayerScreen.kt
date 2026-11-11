@@ -1,5 +1,10 @@
 package com.dividetask.audiobookreader.ui.player
 
+import android.content.res.Configuration
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -62,6 +67,7 @@ import com.dividetask.audiobookreader.data.db.entity.ChapterEntity
 import com.dividetask.audiobookreader.data.db.entity.ListenSessionEntity
 import com.dividetask.audiobookreader.data.db.entity.PositionJumpEntity
 import com.dividetask.audiobookreader.ui.common.ChapterSkipIcon
+import com.dividetask.audiobookreader.ui.common.FullScreenImage
 import com.dividetask.audiobookreader.ui.common.PauseIcon
 import com.dividetask.audiobookreader.ui.common.SkipSecondsIcon
 import java.text.SimpleDateFormat
@@ -73,6 +79,7 @@ import java.util.Locale
 fun PlayerScreen(
     bookId: Long,
     onBack: () -> Unit,
+    onDetails: (asin: String) -> Unit,
     viewModel: PlayerViewModel = hiltViewModel()
 ) {
     val book by viewModel.book.collectAsState()
@@ -85,6 +92,7 @@ fun PlayerScreen(
     var seekPosition by remember { mutableFloatStateOf(0f) }
     var showChapters by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    var showCover by remember { mutableStateOf(false) }
 
     LaunchedEffect(bookId) {
         viewModel.loadBook(bookId)
@@ -106,19 +114,20 @@ fun PlayerScreen(
                     TextButton(onClick = { showHistory = true }) {
                         Text("History")
                     }
+                    // Audible books are stored as {asin}.m4b etc.
+                    val asin = book?.fileUri
+                        ?.let { android.net.Uri.parse(it).path?.substringAfterLast('/')?.substringBeforeLast('.') }
+                        ?.takeIf { Regex("^[A-Z0-9]{10}$").matches(it) }
+                    TextButton(onClick = { asin?.let(onDetails) }, enabled = asin != null) {
+                        Text("Details")
+                    }
                 }
             )
         }
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // File info banner
+        val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+        val fileInfo: @Composable () -> Unit = {
             book?.let { b ->
                 val ext = b.fileUri.substringAfterLast(".")
                 val filePath = android.net.Uri.parse(b.fileUri).path ?: ""
@@ -137,13 +146,10 @@ fun PlayerScreen(
                     )
                 }
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Cover art
+        }
+        val coverArt: @Composable (Modifier) -> Unit = { coverModifier ->
             Box(
-                modifier = Modifier
-                    .fillMaxWidth(0.6f)
+                modifier = coverModifier
                     .aspectRatio(1f)
                     .clip(RoundedCornerShape(12.dp)),
                 contentAlignment = Alignment.Center
@@ -152,7 +158,8 @@ fun PlayerScreen(
                     AsyncImage(
                         model = book?.coverUri,
                         contentDescription = "Book cover",
-                        modifier = Modifier.fillMaxSize(),
+                        // Tap to see it full screen, with pinch to zoom
+                        modifier = Modifier.fillMaxSize().clickable { showCover = true },
                         contentScale = ContentScale.Crop
                     )
                 } else {
@@ -164,10 +171,8 @@ fun PlayerScreen(
                     )
                 }
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Title and author
+        }
+        val titleAndAuthor: @Composable () -> Unit = {
             Text(
                 text = book?.title ?: "",
                 style = MaterialTheme.typography.titleLarge,
@@ -184,7 +189,9 @@ fun PlayerScreen(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-
+        }
+        // Chapter, seek bar, transport controls and speed
+        val playerControls: @Composable ColumnScope.() -> Unit = {
             // Current chapter
             val chapter = chapters.getOrNull(chapterIndex)
             if (chapter != null) {
@@ -328,9 +335,62 @@ fun PlayerScreen(
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
         }
+
+        if (landscape) {
+            // Two columns: small cover and title on the left, controls on the right
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = 24.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(0.4f).fillMaxHeight(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    coverArt(Modifier.fillMaxHeight(0.55f))
+                    Spacer(modifier = Modifier.height(12.dp))
+                    titleAndAuthor()
+                    Spacer(modifier = Modifier.height(4.dp))
+                    fileInfo()
+                }
+                Spacer(modifier = Modifier.width(24.dp))
+                Column(
+                    modifier = Modifier
+                        .weight(0.6f)
+                        .fillMaxHeight()
+                        .verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    playerControls()
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                fileInfo()
+                Spacer(modifier = Modifier.height(8.dp))
+                coverArt(Modifier.fillMaxWidth(0.6f))
+                Spacer(modifier = Modifier.height(24.dp))
+                titleAndAuthor()
+                playerControls()
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+        }
+    }
+
+    if (showCover) {
+        FullScreenImage(model = book?.coverUri, contentDescription = "Book cover", onDismiss = { showCover = false })
     }
 
     if (showChapters) {

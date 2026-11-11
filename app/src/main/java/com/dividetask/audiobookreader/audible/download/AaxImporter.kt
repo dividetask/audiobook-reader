@@ -6,6 +6,7 @@ import com.dividetask.audiobookreader.audible.auth.ActivationBytesProvider
 import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.data.db.entity.AudibleBookEntity
 import com.dividetask.audiobookreader.data.db.entity.BookEntity
+import com.dividetask.audiobookreader.data.db.entity.ChapterEntity
 import com.dividetask.audiobookreader.data.metadata.ffprobeJson
 import com.dividetask.audiobookreader.data.repository.BookRepository
 import com.dividetask.audiobookreader.debug.AppDebugLog
@@ -45,13 +46,22 @@ class AaxImporter @Inject constructor(
     private val bookRepository: BookRepository,
     private val converter: AaxConverter,
     private val activationBytesProvider: ActivationBytesProvider,
-    private val debugLog: AppDebugLog
+    private val pendingStore: PendingDownloadStore,
+    private val debugLog: AppDebugLog,
+    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog,
+    private val metadataExtractor: com.dividetask.audiobookreader.data.metadata.MetadataExtractor,
+    private val seriesRepository: com.dividetask.audiobookreader.data.series.SeriesRepository,
+    private val apiClient: com.dividetask.audiobookreader.audible.api.AudibleApiClient
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
 
     private val _status = MutableStateFlow<AaxImportStatus?>(null)
     val status: StateFlow<AaxImportStatus?> = _status.asStateFlow()
+
+    /** The book being downloaded from the website, which isn't "pending" while that runs. */
+    private val _websiteAsin = MutableStateFlow<String?>(null)
+    val websiteAsin: StateFlow<String?> = _websiteAsin.asStateFlow()
 
     private val audiobooksDir: File
         get() = File(context.getExternalFilesDir(null), "audiobooks").apply { mkdirs() }
@@ -61,14 +71,389 @@ class AaxImporter @Inject constructor(
         get() = File(context.getExternalFilesDir(null), "import").apply { mkdirs() }
 
     fun import(uri: Uri, displayName: String) {
-        scope.launch { mutex.withLock { runImport(uri, displayName) } }
+        scope.launch {
+            mutex.withLock {
+                runImport(displayName, knownAsin = null) { dir, step, progress ->
+                    step("Copying")
+                    val copy = File(dir, "part1.aax")
+                    copyFromUri(uri, copy) { progress("Copying", it) }?.let { Fetched(error = it) } ?: Fetched(listOf(copy))
+                }
+            }
+        }
+    }
+
+    /**
+     * Copies a single audio file into the app, so the book keeps playing when the drive or
+     * folder it came from is gone, and adds it to the library. The original is left as is.
+     */
+    fun importCopy(uri: Uri, displayName: String, replaces: Long? = null) {
+        scope.launch { mutex.withLock { runCopy(uri, displayName, replaces) } }
+    }
+
+    private suspend fun runCopy(uri: Uri, displayName: String, replaces: Long?) {
+        var title = displayName.substringBeforeLast('.')
+        debugLog.section("Import file: $displayName")
+        var lastProgressAt = 0L
+        val dest = File(audiobooksDir, "import_${System.currentTimeMillis()}.${displayName.substringAfterLast('.', "m4b").lowercase()}")
+        fun fail(text: String) {
+            debugLog.log("IMPORT", "FAILED: $text")
+            _status.value = AaxImportStatus(title, "Import failed: $text", finished = true)
+            dest.delete()
+        }
+        try {
+            debugLog.log("IMPORT", "Copying into the app: ${fileSize(uri) / 1_048_576}MB")
+            _status.value = AaxImportStatus(title, "Copying")
+            copyFromUri(uri, dest) { fraction ->
+                val now = System.currentTimeMillis()
+                if (now - lastProgressAt >= 250 || fraction >= 1f) {
+                    lastProgressAt = now
+                    _status.value = AaxImportStatus(title, "Copying", progress = fraction)
+                }
+            }?.let { return fail(it) }
+            val fileUri = Uri.fromFile(dest)
+            val metadata = metadataExtractor.extract(fileUri)
+            // Untagged files are named after the original file, not the app's copy
+            title = metadata.title.takeUnless { it == dest.nameWithoutExtension } ?: title
+            val entity = metadataExtractor.toBookEntity(fileUri, metadata).copy(title = title)
+            val id = bookRepository.insertBook(entity, metadataExtractor.toChapterEntities(0, metadata))
+            debugLog.log("IMPORT", "Added to library: ${dest.name} ($title)")
+            replace(replaces, id, entity.durationMs)
+            seriesRepository.refresh()
+            _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
+        } catch (e: Exception) {
+            fail("${e::class.simpleName}: ${e.message}")
+        }
+    }
+
+    /** Removes the book an import replaces (the user chose Replace), and any other copy. */
+    private suspend fun replace(oldId: Long?, newId: Long, @Suppress("UNUSED_PARAMETER") newDurationMs: Long) {
+        val keep = bookRepository.getBookById(newId) ?: return
+        oldId?.let { bookRepository.getBookById(it) }?.let { merge(keep, it) }
+        removeOtherCopies(newId)
+    }
+
+    /**
+     * Only one copy of a book: removes every other book with the same title and author as
+     * [keepId], its file included. Call after adding a book, however it was added.
+     */
+    suspend fun removeOtherCopies(keepId: Long) {
+        val keep = bookRepository.getBookById(keepId) ?: return
+        bookRepository.getAllBooksOnce()
+            .filter { it.id != keep.id && copyKey(it) == copyKey(keep) }
+            .forEach { merge(keep, it) }
+    }
+
+    private fun copyKey(book: BookEntity) =
+        com.dividetask.audiobookreader.data.series.SeriesIndex.normalize(book.title) + "|" +
+            com.dividetask.audiobookreader.data.series.SeriesIndex.normalize(book.author)
+
+    /**
+     * Removes [other], a copy of [keep]. If it's the same recording (lengths within 2%) and
+     * was played more recently, [keep] takes over its place in the book.
+     */
+    private suspend fun merge(keep: BookEntity, other: BookEntity) {
+        val sameRecording = kotlin.math.abs(keep.durationMs - other.durationMs) <= maxOf(keep.durationMs, other.durationMs) / 50
+        val takePlace = sameRecording && other.currentPositionMs > 0 && other.lastPlayed >= keep.lastPlayed
+        if (takePlace) bookRepository.updatePosition(keep.id, other.currentPositionMs, other.currentChapterIndex)
+        bookRepository.deleteBook(other.id)
+        if (other.fileUri != keep.fileUri) removeFile(other.fileUri)
+        debugLog.log("LIB", "Removed another copy of ${keep.title} (${other.fileUri.substringAfterLast('/')})${if (takePlace) ", keeping its place" else ""}")
+    }
+
+    /**
+     * Merges copies already in the library into one each, keeping the copy in the app's
+     * storage (else the most recently played).
+     */
+    private suspend fun removeExistingCopies() {
+        val appDir = context.getExternalFilesDir(null)?.canonicalPath
+        fun inApp(book: BookEntity) = Uri.parse(book.fileUri).let { uri ->
+            uri.scheme == "file" && appDir != null && uri.path?.let { File(it).canonicalPath.startsWith(appDir) && File(it).exists() } == true
+        }
+        for (copies in bookRepository.getAllBooksOnce().groupBy(::copyKey).values.filter { it.size > 1 }) {
+            val keep = copies.sortedWith(compareByDescending<BookEntity> { inApp(it) }.thenByDescending { it.lastPlayed }).first()
+            copies.filter { it.id != keep.id }.forEach { merge(keep, it) }
+        }
+    }
+
+    /** Deletes a book's file if it's in the app's storage; for a file elsewhere, lets go of the permission to read it. */
+    private fun removeFile(fileUri: String) {
+        val uri = Uri.parse(fileUri)
+        val appDir = context.getExternalFilesDir(null)?.canonicalPath ?: return
+        val path = uri.path
+        if (uri.scheme == "file" && path != null) {
+            val file = File(path).canonicalFile
+            if (file.path.startsWith(appDir + File.separator)) file.delete()
+        } else if (uri.scheme == "content") {
+            try {
+                context.contentResolver.releasePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e: SecurityException) {
+                // Never persisted
+            }
+        }
+    }
+
+    /**
+     * Books added before files were copied into the app still point to where they were
+     * added from, e.g. a USB drive. Copies each one in when its file can be read; one that
+     * can't (the drive is unplugged) is tried again the next time the app starts.
+     */
+    fun copyExternalBooks() {
+        scope.launch {
+            mutex.withLock {
+                removeExistingCopies()
+                val external = bookRepository.getAllBooksOnce().filter { it.fileUri.startsWith("content://") }
+                if (external.isEmpty()) return@withLock
+                debugLog.section("Copy ${external.size} added book(s) into the app")
+                var copied = 0
+                for (book in external) {
+                    val uri = Uri.parse(book.fileUri)
+                    val ext = displayNameOf(uri)?.substringAfterLast('.', "")?.lowercase()?.ifEmpty { null } ?: "m4b"
+                    val dest = File(audiobooksDir, "import_${System.currentTimeMillis()}.$ext")
+                    var lastProgressAt = 0L
+                    _status.value = AaxImportStatus(book.title, "Copying into the app")
+                    val error = try {
+                        copyFromUri(uri, dest) { fraction ->
+                            val now = System.currentTimeMillis()
+                            if (now - lastProgressAt >= 250 || fraction >= 1f) {
+                                lastProgressAt = now
+                                _status.value = AaxImportStatus(book.title, "Copying into the app", progress = fraction)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.message ?: e::class.simpleName
+                    }
+                    if (error != null) {
+                        dest.delete()
+                        debugLog.log("IMPORT", "Can't copy ${book.title} yet ($error) — trying again next time the app starts")
+                        continue
+                    }
+                    bookRepository.updateFileUri(book.id, Uri.fromFile(dest).toString())
+                    removeFile(book.fileUri)
+                    debugLog.log("IMPORT", "Copied ${book.title} into the app: ${dest.name}, ${dest.length() / 1_048_576}MB")
+                    copied++
+                }
+                _status.value = if (copied > 0) {
+                    AaxImportStatus("", "Copied $copied book${if (copied == 1) "" else "s"} into the app", finished = true)
+                } else {
+                    null
+                }
+            }
+        }
+    }
+
+    private fun displayNameOf(uri: Uri): String? = try {
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { if (it.moveToFirst()) it.getString(0) else null }
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * Downloads [asin] from the Audible website (when the API's download limit blocks it),
+     * using the website session the in-app browser signed into, then imports it. [urls] are
+     * the book's download links in order: one, or one per part for books Audible splits.
+     */
+    fun importFromWebsite(urls: List<String>, userAgent: String?, asin: String, title: String) {
+        scope.launch {
+            mutex.withLock {
+                _websiteAsin.value = asin
+                try {
+                    runImport("$title.aax", knownAsin = asin) { dir, step, progress ->
+                        val files = mutableListOf<File>()
+                        for ((i, url) in urls.withIndex()) {
+                            val label = if (urls.size > 1) "Downloading part ${i + 1} of ${urls.size}" else "Downloading from Audible website"
+                            step(label)
+                            val part = File(dir, "part${i + 1}.aax")
+                            downloadWithWebsiteCookies(url, userAgent, part) { progress(label, it) }
+                                ?.let { return@runImport Fetched(error = it) }
+                            files += part
+                        }
+                        Fetched(files)
+                    }
+                } finally {
+                    _websiteAsin.value = null
+                }
+            }
+        }
+    }
+
+    /**
+     * Imports a book split into several audio files (e.g. one MP3 per chapter): copies them
+     * in file-name order, joins them into one AAC .m4b with a chapter per file, and takes
+     * the title, author and cover from the files. Playlists, text and other non-audio files
+     * among [files] (uri to file name) are skipped; an image among them is the cover when
+     * the files have none.
+     */
+    fun importJoined(files: List<Pair<Uri, String>>, replaces: Long? = null) {
+        scope.launch { mutex.withLock { runJoin(files, replaces) } }
+    }
+
+    private suspend fun runJoin(files: List<Pair<Uri, String>>, replaces: Long?) {
+        fun ext(name: String) = name.substringAfterLast('.', "").lowercase()
+        // Natural order, so "2-…" comes before "10-…"
+        val byName = compareBy<Pair<Uri, String>> { (_, name) -> name.lowercase().replace(Regex("\\d+")) { it.value.padStart(10, '0') } }
+        val audio = files.filter { ext(it.second) in AUDIO_EXTENSIONS }.sortedWith(byName)
+        val image = files.filter { ext(it.second) in IMAGE_EXTENSIONS }.sortedWith(byName).firstOrNull()
+
+        var title = audio.firstOrNull()?.second?.substringBeforeLast('.') ?: "Book"
+        debugLog.section("Import files: ${audio.size} audio of ${files.size} picked")
+        importDir.listFiles()?.forEach { it.delete() }
+        fun step(text: String) {
+            debugLog.log("IMPORT", text)
+            _status.value = AaxImportStatus(title, text)
+        }
+        var lastProgressAt = 0L
+        fun progress(text: String, fraction: Float) {
+            val now = System.currentTimeMillis()
+            if (now - lastProgressAt < 250 && fraction < 1f) return
+            lastProgressAt = now
+            _status.value = AaxImportStatus(title, text, progress = fraction)
+        }
+        fun fail(text: String) {
+            debugLog.log("IMPORT", "FAILED: $text")
+            _status.value = AaxImportStatus(title, "Import failed: $text", finished = true)
+            importDir.listFiles()?.forEach { it.delete() }
+        }
+
+        try {
+            if (audio.isEmpty()) return fail("None of the picked files is audio")
+            files.filter { it !in audio && it != image }.forEach { debugLog.log("IMPORT", "Skipped: ${it.second}") }
+
+            val parts = mutableListOf<File>()
+            for ((i, file) in audio.withIndex()) {
+                val label = "Copying file ${i + 1} of ${audio.size}"
+                if (i == 0) step(label)
+                val part = File(importDir, "part%04d.%s".format(i + 1, ext(file.second)))
+                copyFromUri(file.first, part) { progress(label, (i + it) / audio.size) }
+                    ?.let { return fail("${file.second}: $it") }
+                parts += part
+            }
+
+            val first = probeFormat(parts[0])
+            val firstTags = first?.optJSONObject("tags")
+            // Tag names vary in case between formats ("album" in MP3, "ALBUM" in FLAC)
+            val tags = firstTags?.let { t -> t.keys().asSequence().associate { it.lowercase() to t.optString(it) } }.orEmpty()
+            fun tag(vararg keys: String) = keys.firstNotNullOfOrNull { tags[it]?.takeIf(String::isNotBlank) }
+            title = tag("album") ?: tag("title") ?: title
+            val author = tag("album_artist", "artist") ?: "Unknown Author"
+            debugLog.log("IMPORT", "Tags: album=${tag("album")}, artist=$author")
+
+            // One chapter per file, named by its title tag or else its file name
+            val chapters = mutableListOf<ChapterEntity>()
+            var offset = 0L
+            for ((i, part) in parts.withIndex()) {
+                val format = if (i == 0) first else probeFormat(part)
+                val length = format?.optString("duration")?.toDoubleOrNull()?.times(1000)?.toLong() ?: 0L
+                val name = format?.optJSONObject("tags")?.optString("title")?.takeIf { it.isNotBlank() }
+                    ?: audio[i].second.substringBeforeLast('.')
+                chapters += ChapterEntity(bookId = 0, title = name, startPositionMs = offset,
+                    endPositionMs = offset + length, index = i)
+                offset += length
+            }
+
+            val metadata = File(importDir, "metadata.txt")
+            metadata.writeText(ffMetadata(title, author, chapters))
+            // Keep about the source's bitrate (audiobooks are often 64k); AAC needs no more
+            val bitrate = (first?.optString("bit_rate")?.toIntOrNull() ?: 64_000).coerceIn(48_000, 128_000)
+            val baseName = "import_${System.currentTimeMillis()}"
+            val out = File(importDir, "$baseName.m4b")
+            val label = "Converting ${parts.size} files"
+            step(label)
+            if (!converter.joinToM4b(parts, metadata, out, bitrate, offset) { progress(label, it) }) {
+                return fail("Converting failed — see the debug log")
+            }
+            parts.forEach { it.delete() }
+            metadata.delete()
+
+            val dest = File(audiobooksDir, out.name)
+            if (!out.renameTo(dest)) {
+                out.copyTo(dest, overwrite = true)
+                out.delete()
+            }
+            val cover = saveCover(baseName, image?.first, audio[0].first)
+            val asin = metadataExtractor.readAsin(audio[0].first).orEmpty()
+            val id = bookRepository.insertBook(
+                BookEntity(
+                    title = title,
+                    author = author,
+                    coverUri = cover,
+                    fileUri = Uri.fromFile(dest).toString(),
+                    durationMs = durationMsOf(dest) ?: offset,
+                    chaptersChecked = true,
+                    asin = asin
+                ),
+                chapters
+            )
+            debugLog.log("IMPORT", "Added to library: ${dest.name}, ${chapters.size} chapters${if (asin.isNotEmpty()) ", ASIN $asin" else ""}")
+            replace(replaces, id, durationMsOf(dest) ?: offset)
+            seriesRepository.refresh()
+            _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
+        } catch (e: Exception) {
+            fail("${e::class.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun probeFormat(file: File) = try {
+        ffprobeJson("-show_format", file.absolutePath)?.optJSONObject("format")
+    } catch (e: Exception) {
+        null
+    }
+
+    /** An FFMETADATA file giving the joined book its tags and chapters. */
+    private fun ffMetadata(title: String, author: String, chapters: List<ChapterEntity>): String {
+        fun esc(s: String) = s.replace(Regex("([=;#\\\\\n])"), "\\\\$1")
+        return buildString {
+            appendLine(";FFMETADATA1")
+            appendLine("title=${esc(title)}")
+            appendLine("album=${esc(title)}")
+            appendLine("artist=${esc(author)}")
+            appendLine("genre=Audiobook")
+            for (c in chapters) {
+                appendLine("[CHAPTER]")
+                appendLine("TIMEBASE=1/1000")
+                appendLine("START=${c.startPositionMs}")
+                appendLine("END=${c.endPositionMs}")
+                appendLine("title=${esc(c.title)}")
+            }
+        }
+    }
+
+    /** Saves the first file's embedded picture, else the picked image, as the book's cover. */
+    private fun saveCover(baseName: String, image: Uri?, firstAudio: Uri): String? {
+        val retriever = android.media.MediaMetadataRetriever()
+        val embedded = try {
+            retriever.setDataSource(context, firstAudio)
+            retriever.embeddedPicture
+        } catch (e: Exception) {
+            null
+        } finally {
+            retriever.release()
+        }
+        val bytes = embedded
+            ?: image?.let { context.contentResolver.openInputStream(it)?.use { s -> s.readBytes() } }
+            ?: return null
+        val file = File(File(context.filesDir, "covers").apply { mkdirs() }, "$baseName.jpg")
+        file.writeBytes(bytes)
+        return Uri.fromFile(file).toString()
     }
 
     fun clearStatus() {
         if (_status.value?.finished == true) _status.value = null
     }
 
-    private suspend fun runImport(uri: Uri, displayName: String) {
+    /** The .aax file(s) of one book, in order, or why they couldn't be fetched. */
+    private class Fetched(val files: List<File> = emptyList(), val error: String? = null)
+
+    /**
+     * [fetch] puts the book's .aax file(s) in the given folder, reporting steps and progress.
+     * Each file is decrypted and converted; several parts are joined into one book, with
+     * the parts' chapters laid end to end.
+     */
+    private suspend fun runImport(
+        displayName: String,
+        knownAsin: String?,
+        fetch: suspend (File, (String) -> Unit, (String, Float) -> Unit) -> Fetched
+    ) {
         debugLog.section("Import AAX: $displayName")
         var title = displayName.substringBeforeLast('.')
         importDir.listFiles()?.forEach { it.delete() }
@@ -92,26 +477,14 @@ class AaxImporter @Inject constructor(
         }
 
         try {
-            step("Copying")
-            val copy = File(importDir, "import.aax")
-            val size = fileSize(uri)
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                copy.outputStream().use { output ->
-                    val buffer = ByteArray(1 shl 20)
-                    var copied = 0L
-                    while (true) {
-                        val n = input.read(buffer)
-                        if (n < 0) break
-                        output.write(buffer, 0, n)
-                        copied += n
-                        if (size > 0) progress("Copying", copied.toFloat() / size)
-                    }
-                }
-            } ?: return fail("Could not open the file")
-            debugLog.log("IMPORT", "Copied ${copy.length() / 1_048_576}MB")
+            val fetched = fetch(importDir, ::step, ::progress)
+            fetched.error?.let { return fail(it) }
+            val parts = fetched.files.ifEmpty { return fail("Nothing was downloaded") }
+            debugLog.log("IMPORT", "Got ${parts.size} file(s), ${parts.sumOf { it.length() } / 1_048_576}MB")
 
-            val tags = probeTags(copy)
-            val match = matchToLibrary(tags.title, tags.artist, displayName)
+            val tags = probeTags(parts[0])
+            val match = knownAsin?.let { asin -> audibleBookDao.getAllOnce().firstOrNull { it.asin == asin } }
+                ?: matchToLibrary(tags.title, tags.artist, displayName)
             title = match?.title ?: tags.title ?: title
             debugLog.log("IMPORT", "Tags: title=${tags.title}, artist=${tags.artist}")
             debugLog.log("IMPORT", "Audible match: ${match?.let { "${it.title} (${it.asin})" } ?: "none"}")
@@ -127,35 +500,290 @@ class AaxImporter @Inject constructor(
             val activationBytes = activationBytesProvider.getActivationBytes()
                 ?: return fail("Could not get activation bytes from Audible")
 
-            // The converter names its output after the input, so give the copy its final name
-            val aax = File(importDir, "$baseName.aax")
-            copy.renameTo(aax)
-
-            step("Converting")
-            val converted = converter.convert(aax, activationBytes) { progress("Converting", it) }
-                ?: return fail("Conversion failed — see the debug log")
-            aax.delete()
-
-            val dest = File(audiobooksDir, converted.name)
-            if (!converted.renameTo(dest)) {
-                converted.copyTo(dest, overwrite = true)
-                converted.delete()
+            // The converter names its output after the input, so give each part its final name
+            val named = parts.mapIndexed { i, part ->
+                File(importDir, if (parts.size == 1) "$baseName.aax" else "${baseName}_part${i + 1}.aax").also { part.renameTo(it) }
+            }
+            var chapters = emptyList<ChapterEntity>()
+            val joined = if (named.size == 1) {
+                step("Converting")
+                converter.convert(named[0], activationBytes) { progress("Converting", it) }
+                    ?.also { named[0].delete() }
+                    ?: return fail("Conversion failed — see the debug log")
+            } else {
+                // The whole book's chapter data gives the chapter names and what to cut where the parts meet
+                val plan = match?.asin?.let { planParts(named, it) }
+                chapters = plan?.chapters ?: partChapters(named)
+                val total = plan?.keep?.sumOf { it.last - it.first } ?: named.sumOf { durationMsOf(it) ?: 0L }
+                val out = File(importDir, "$baseName.m4b")
+                val label = "Converting ${named.size} parts"
+                step(label)
+                // One pass, decrypting and joining together; else each part, then a join
+                if (!converter.decryptJoin(named, activationBytes, out, total, plan?.keep) { progress(label, it) }) {
+                    val converted = mutableListOf<File>()
+                    for ((i, aax) in named.withIndex()) {
+                        val partLabel = "Converting part ${i + 1} of ${named.size}"
+                        step(partLabel)
+                        converted += converter.convert(aax, activationBytes) { progress(partLabel, it) }
+                            ?: return fail("Conversion failed — see the debug log")
+                    }
+                    step("Joining ${converted.size} parts")
+                    if (!converter.concat(converted, out, total, plan?.keep) { progress("Joining ${converted.size} parts", it) }) {
+                        return fail("Joining the parts failed — see the debug log")
+                    }
+                    converted.forEach { it.delete() }
+                }
+                named.forEach { it.delete() }
+                out
             }
 
-            bookRepository.insertBook(
+            val dest = File(audiobooksDir, joined.name)
+            if (!joined.renameTo(dest)) {
+                joined.copyTo(dest, overwrite = true)
+                joined.delete()
+            }
+
+            val id = bookRepository.insertBook(
                 BookEntity(
                     title = title,
                     author = match?.author ?: tags.artist ?: "Unknown Author",
                     coverUri = match?.coverUrl,
                     fileUri = Uri.fromFile(dest).toString(),
-                    durationMs = tags.durationMs ?: ((match?.runtimeMinutes ?: 0) * 60_000L)
+                    durationMs = durationMsOf(dest) ?: tags.durationMs ?: ((match?.runtimeMinutes ?: 0) * 60_000L),
+                    // A joined book's chapters come from its parts, not the file
+                    chaptersChecked = chapters.isNotEmpty()
                 ),
-                emptyList()
+                chapters
             )
-            debugLog.log("IMPORT", "Added to library: ${dest.name}")
+            debugLog.log("IMPORT", "Added to library: ${dest.name}${if (chapters.isNotEmpty()) ", ${chapters.size} chapters" else ""}")
+            removeOtherCopies(id)
+            // No longer waiting on Audible's download limit
+            match?.asin?.let { pendingStore.remove(it) }
             _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
         } catch (e: Exception) {
             fail("${e::class.simpleName}: ${e.message}")
+        }
+    }
+
+    private class PartPlan(val keep: List<LongRange>, val chapters: List<ChapterEntity>)
+
+    /**
+     * Fits the whole book's chapters (Audible no longer serves chapter data for the part
+     * ASINs) to the parts, cutting what the parts add: the "This is Audible" intro of every
+     * part after the first, and the "broken up into multiple pieces" notice at the end of
+     * every part before the last. The parts' combined length minus the book's length is
+     * those intros and notices; with the intro's length from Audible, that gives the
+     * notice's, taken to be the same clip each time. The joined parts then line up with the
+     * book's chapter times. Null when the data is missing or the numbers don't add up; the
+     * parts are then joined whole with their own chapters.
+     */
+    private suspend fun planParts(parts: List<File>, bookAsin: String): PartPlan? {
+        val lengths = parts.map { durationMsOf(it) ?: return null }
+        val result = apiClient.getChapterInfo(bookAsin)
+        val info = result.data ?: run {
+            debugLog.log("IMPORT", "No chapter data for $bookAsin: ${result.error ?: result.debugLog.lastOrNull()}")
+            return null
+        }
+        val bookLength = info.runtimeLengthMs.takeIf { it > 0 }
+            ?: info.chapters.maxOfOrNull { it.startOffsetMs + it.lengthMs }
+            ?: return null
+        val intro = info.brandIntroDurationMs
+        val extra = lengths.sum() - bookLength
+        val notice = extra / (parts.size - 1) - intro
+        debugLog.log("IMPORT", "Parts ${lengths.joinToString { "${it / 1000}s" }} = ${lengths.sum() / 1000}s; book ${bookLength / 1000}s; " +
+            "intro ${intro}ms, outro ${info.brandOutroDurationMs}ms → notice ${notice}ms per part")
+        if (intro !in 0..MAX_CUT_MS || notice !in 0..MAX_CUT_MS) {
+            debugLog.log("IMPORT", "Those don't add up — joining the parts whole, with their own chapters")
+            return null
+        }
+        val keep = lengths.mapIndexed { i, length ->
+            val start = if (i > 0) intro else 0L
+            val end = if (i < parts.lastIndex) length - notice else length
+            start..end
+        }
+        val chapters = apiClient.flattenChapters(info.chapters)
+            .filter { it.startOffsetMs < bookLength }
+            .mapIndexed { i, c ->
+                ChapterEntity(
+                    bookId = 0,
+                    title = c.title.ifBlank { "Chapter ${i + 1}" },
+                    startPositionMs = c.startOffsetMs,
+                    endPositionMs = minOf(c.startOffsetMs + c.lengthMs, bookLength),
+                    index = i
+                )
+            }
+        debugLog.log("IMPORT", "Using $bookAsin's ${chapters.size} chapters")
+        return PartPlan(keep, chapters)
+    }
+
+    private fun durationMsOf(file: File): Long? = try {
+        ffprobeJson("-show_format", file.absolutePath)?.optJSONObject("format")
+            ?.optString("duration")?.toDoubleOrNull()?.times(1000)?.toLong()
+    } catch (e: Exception) {
+        null
+    }
+
+    /** Each part's chapters, shifted by the length of the parts before it. */
+    private fun partChapters(parts: List<File>): List<ChapterEntity> {
+        val chapters = mutableListOf<ChapterEntity>()
+        var offset = 0L
+        for ((p, part) in parts.withIndex()) {
+            val array = try {
+                ffprobeJson("-show_chapters", part.absolutePath)?.optJSONArray("chapters")
+            } catch (e: Exception) {
+                null
+            }
+            val partLength = durationMsOf(part) ?: 0L
+            if (array == null || array.length() == 0) {
+                // No chapters in this part: make the whole part one chapter
+                chapters += ChapterEntity(bookId = 0, title = "Part ${p + 1}", startPositionMs = offset,
+                    endPositionMs = offset + partLength, index = chapters.size)
+            } else {
+                for (i in 0 until array.length()) {
+                    val c = array.getJSONObject(i)
+                    val name = c.optJSONObject("tags")?.optString("title").orEmpty()
+                    chapters += ChapterEntity(
+                        bookId = 0,
+                        title = name.ifBlank { "Chapter ${chapters.size + 1}" },
+                        startPositionMs = offset + ((c.optString("start_time").toDoubleOrNull() ?: 0.0) * 1000).toLong(),
+                        endPositionMs = offset + ((c.optString("end_time").toDoubleOrNull() ?: 0.0) * 1000).toLong(),
+                        index = chapters.size
+                    )
+                }
+            }
+            offset += partLength
+        }
+        return chapters
+    }
+
+    private fun copyFromUri(uri: Uri, dest: File, onProgress: (Float) -> Unit): String? {
+        val size = fileSize(uri)
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            dest.outputStream().use { output -> copyStream(input, output, size, 0, onProgress) }
+        } ?: return "Could not open the file"
+        return null
+    }
+
+    /**
+     * Fetches [url] with the in-app browser's cookies, following redirects by hand so each
+     * host (audible.com, then the download server) gets its own cookies.
+     */
+    private fun downloadWithWebsiteCookies(url: String, userAgent: String?, dest: File, onProgress: (Float) -> Unit): String? {
+        val cookies = android.webkit.CookieManager.getInstance()
+        var current = url
+        repeat(10) {
+            val connection = java.net.URL(current).openConnection() as java.net.HttpURLConnection
+            try {
+                connection.instanceFollowRedirects = false
+                cookies.getCookie(current)?.let { connection.setRequestProperty("Cookie", it) }
+                userAgent?.let { connection.setRequestProperty("User-Agent", it) }
+                val started = System.currentTimeMillis()
+                val code = connection.responseCode
+                debugLog.log("IMPORT", "GET ${current.substringBefore('?')}: $code")
+                requestLog.request("website-download", "GET", current, code,
+                    System.currentTimeMillis() - started, connection.contentLengthLong)
+                when (code) {
+                    in 300..399 -> {
+                        val location = connection.getHeaderField("Location") ?: return "Redirect without a location"
+                        current = java.net.URL(java.net.URL(current), location).toString()
+                    }
+                    200 -> {
+                        val type = connection.contentType.orEmpty()
+                        if (type.startsWith("text/") || "xml" in type) {
+                            // An error page, e.g. <Message>…download individual parts.</Message>
+                            val body = connection.inputStream.bufferedReader().use { it.readText().take(4000) }
+                            val message = Regex("<Message>(.*?)</Message>", RegexOption.DOT_MATCHES_ALL).find(body)?.groupValues?.get(1)
+                            debugLog.log("IMPORT", "Not a book: $type ${body.take(300)}")
+                            return message?.let { "Audible: $it" } ?: "Audible sent a web page instead of the book — sign in again"
+                        }
+                        val total = connection.contentLengthLong
+                        val broken = try {
+                            connection.inputStream.use { input ->
+                                dest.outputStream().use { output -> copyStream(input, output, total, 0, onProgress) }
+                            }
+                            if (total > 0 && dest.length() < total) java.io.IOException("ended early") else null
+                        } catch (e: java.io.IOException) {
+                            e
+                        }
+                        // A dropped connection picks up where it stopped instead of failing the import
+                        broken?.let { resumeDownload(current, userAgent, dest, total, it, onProgress) }?.let { return it }
+                        // .aax files are MP4 containers: "ftyp" at byte 4
+                        val header = ByteArray(8)
+                        dest.inputStream().use { it.read(header) }
+                        if (String(header, 4, 4, Charsets.US_ASCII) != "ftyp") return "The download isn't an .aax file"
+                        return null
+                    }
+                    else -> {
+                        val body = connection.errorStream?.bufferedReader()?.use { it.readText().take(4000) }.orEmpty()
+                        debugLog.log("IMPORT", "HTTP $code body: ${body.take(500)}")
+                        val message = Regex("<Message>(.*?)</Message>", RegexOption.DOT_MATCHES_ALL).find(body)?.groupValues?.get(1)
+                        return message?.let { "Audible (HTTP $code): $it" } ?: "Audible website returned HTTP $code"
+                    }
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+        return "Too many redirects"
+    }
+
+    /**
+     * Continues a download that broke off, asking for the rest of the file from where
+     * [dest] ends. Null once it's complete, else why it couldn't be.
+     */
+    private fun resumeDownload(
+        url: String,
+        userAgent: String?,
+        dest: File,
+        total: Long,
+        first: java.io.IOException,
+        onProgress: (Float) -> Unit
+    ): String? {
+        var error: java.io.IOException = first
+        for (attempt in 1..RESUME_ATTEMPTS) {
+            val have = dest.length()
+            debugLog.log("IMPORT", "Download broke at ${have / 1_048_576}MB of ${total / 1_048_576}MB (${error.message}) — resuming, try $attempt of $RESUME_ATTEMPTS")
+            Thread.sleep(attempt * 5_000L)
+            val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            try {
+                android.webkit.CookieManager.getInstance().getCookie(url)?.let { connection.setRequestProperty("Cookie", it) }
+                userAgent?.let { connection.setRequestProperty("User-Agent", it) }
+                connection.setRequestProperty("Range", "bytes=$have-")
+                val started = System.currentTimeMillis()
+                val code = connection.responseCode
+                requestLog.request("website-download", "GET", url, code,
+                    System.currentTimeMillis() - started, connection.contentLengthLong, "resume from $have")
+                // 206: the rest of the file; 200: the server ignored the range, so start over
+                val append = code == 206
+                if (code != 206 && code != 200) return "Download broke and couldn't be resumed (HTTP $code)"
+                connection.inputStream.use { input ->
+                    java.io.FileOutputStream(dest, append).use { output ->
+                        copyStream(input, output, total, if (append) have else 0, onProgress)
+                    }
+                }
+                if (total <= 0 || dest.length() >= total) {
+                    debugLog.log("IMPORT", "Resumed download finished: ${dest.length() / 1_048_576}MB")
+                    return null
+                }
+                error = java.io.IOException("ended early")
+            } catch (e: java.io.IOException) {
+                error = e
+            } finally {
+                connection.disconnect()
+            }
+        }
+        return "Download kept breaking off: ${error.message}"
+    }
+
+    private fun copyStream(input: java.io.InputStream, output: java.io.OutputStream, size: Long, alreadyHave: Long, onProgress: (Float) -> Unit) {
+        val buffer = ByteArray(1 shl 20)
+        var copied = alreadyHave
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            output.write(buffer, 0, n)
+            copied += n
+            if (size > 0) onProgress(copied.toFloat() / size)
         }
     }
 
@@ -212,4 +840,12 @@ class AaxImporter @Inject constructor(
     }
 
     private fun normalize(s: String): String = s.lowercase().replace(Regex("[^a-z0-9]"), "")
+
+    private companion object {
+        val AUDIO_EXTENSIONS = setOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "wma")
+        val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png")
+        // Never cut more than this from either end of a part, whatever Audible's data says
+        const val MAX_CUT_MS = 3 * 60_000L
+        const val RESUME_ATTEMPTS = 5
+    }
 }

@@ -46,7 +46,8 @@ class AudibleApiClient @Inject constructor(
     private val tokenStore: AudibleTokenStore,
     private val authManager: AudibleAuthManager,
     private val signer: AudibleRequestSigner,
-    private val debugLog: AppDebugLog
+    private val debugLog: AppDebugLog,
+    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -254,7 +255,11 @@ class AudibleApiClient @Inject constructor(
      * Fetches the chapter list for [asin]. Returns null data on failure (network/auth),
      * or an empty list when Audible has no chapters for the title.
      */
-    suspend fun getChapters(asin: String): ApiResult<List<AudibleChapter>> {
+    suspend fun getChapters(asin: String): ApiResult<List<AudibleChapter>> =
+        getChapterInfo(asin).let { ApiResult(it.data?.let { info -> flattenChapters(info.chapters) }, it.debugLog, it.error) }
+
+    /** The chapter list for [asin] as Audible sends it, with its brand intro and outro lengths. */
+    suspend fun getChapterInfo(asin: String): ApiResult<AudibleChapterInfo> {
         val log = mutableListOf<String>()
         val locale = AudibleEndpoints.getLocale(tokenStore.locale)
         val url = AudibleEndpoints.contentMetadataUrl(locale, asin)
@@ -290,9 +295,9 @@ class AudibleApiClient @Inject constructor(
                 log.add("Response: ${responseText.take(300)}")
                 return ApiResult(null, log)
             }
-            val chapters = json.decodeFromString<AudibleChapterResponse>(responseText)
-                .contentMetadata?.chapterInfo?.chapters.orEmpty()
-            ApiResult(flattenChapters(chapters), log)
+            val info = json.decodeFromString<AudibleChapterResponse>(responseText)
+                .contentMetadata?.chapterInfo ?: AudibleChapterInfo()
+            ApiResult(info, log)
         } catch (e: Exception) {
             log.add("EXCEPTION: ${e::class.simpleName}: ${e.message}")
             Log.e("AudibleApi", "Chapter fetch failed for $asin", e)
@@ -300,7 +305,43 @@ class AudibleApiClient @Inject constructor(
         }
     }
 
-    private fun flattenChapters(chapters: List<AudibleChapter>): List<AudibleChapter> =
+    /**
+     * GET https://{api}/1.0/catalog/{path} — product details, series, reviews. Returns the
+     * raw JSON so callers can pick out whatever fields Audible sends.
+     */
+    suspend fun getCatalog(path: String, params: Map<String, String>): ApiResult<kotlinx.serialization.json.JsonObject> {
+        val log = mutableListOf<String>()
+        val locale = AudibleEndpoints.getLocale(tokenStore.locale)
+        val url = "https://${locale.apiDomain}/1.0/catalog/$path"
+        val accessToken = tokenStore.accessToken ?: ""
+        return try {
+            var response = httpClient.get(url) {
+                params.forEach { (k, v) -> parameter(k, v) }
+                authorize("GET", accessToken)
+            }
+            if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
+                log.add("Got ${response.status}, refreshing token")
+                if (authManager.refreshAccessToken()) {
+                    response = httpClient.get(url) {
+                        params.forEach { (k, v) -> parameter(k, v) }
+                        authorize("GET", tokenStore.accessToken ?: "", sign = false)
+                    }
+                }
+            }
+            val text = response.bodyAsText()
+            log.add("GET catalog/$path: ${response.status}")
+            if (response.status != HttpStatusCode.OK) {
+                log.add("Response: ${text.take(300)}")
+                return ApiResult(null, log, "Audible catalog: ${response.status} ${text.take(200)}")
+            }
+            ApiResult(json.parseToJsonElement(text).jsonObject, log)
+        } catch (e: Exception) {
+            log.add("EXCEPTION: ${e::class.simpleName}: ${e.message}")
+            ApiResult(null, log, "Audible catalog: ${e.message}")
+        }
+    }
+
+    fun flattenChapters(chapters: List<AudibleChapter>): List<AudibleChapter> =
         chapters.flatMap { listOf(it.copy(chapters = null)) + flattenChapters(it.chapters.orEmpty()) }
 
     private fun decryptVoucher(asin: String, encryptedVoucher: String): String? {
@@ -348,8 +389,12 @@ class AudibleApiClient @Inject constructor(
             debugLog.log("API", "Denied [$type] $reason: $message")
         }
         val codes = reasons.mapNotNull { it["rejectionReason"]?.jsonPrimitive?.content }
+        requestLog.event("license-denied", reasons.joinToString("; ") {
+            "${it["validationType"]?.jsonPrimitive?.content}:${it["rejectionReason"]?.jsonPrimitive?.content}"
+        })
         return when {
             "CustomerThrottled" in codes -> {
+                requestLog.event("throttled", "skipping license requests for ${THROTTLE_COOLDOWN_MS / 60_000} min")
                 throttledUntil = System.currentTimeMillis() + THROTTLE_COOLDOWN_MS
                 debugLog.log("API", "Throttled — skipping license requests for ${THROTTLE_COOLDOWN_MS / 60_000} min")
                 throttleMessage()

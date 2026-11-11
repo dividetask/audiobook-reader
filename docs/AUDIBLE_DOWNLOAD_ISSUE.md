@@ -1,5 +1,8 @@
 # Audible download failures — handoff notes
 
+> The long-term question of what triggers Audible's limit, and the request log
+> we collect to answer it, is in [AUDIBLE_RATE_LIMITS.md](AUDIBLE_RATE_LIMITS.md).
+
 Status as of v0.107 a (2026-10-20). Downloads from Audible fail; importing
 `.aax` files downloaded from the Audible website works (Library tab → +).
 

@@ -16,7 +16,12 @@ import com.dividetask.audiobookreader.data.db.entity.AudibleBookEntity
 import com.dividetask.audiobookreader.data.db.entity.BookEntity
 import com.dividetask.audiobookreader.data.metadata.MetadataExtractor
 import com.dividetask.audiobookreader.data.repository.BookRepository
+import com.dividetask.audiobookreader.data.series.SeriesIndex
+import com.dividetask.audiobookreader.data.series.SeriesRepository
 import com.dividetask.audiobookreader.debug.AppDebugLog
+import com.dividetask.audiobookreader.ui.common.ListSortPreferences
+import com.dividetask.audiobookreader.ui.common.SortOrder
+import com.dividetask.audiobookreader.ui.common.SortTab
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.Context
@@ -24,6 +29,7 @@ import android.content.Intent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -41,6 +47,8 @@ class MainViewModel @Inject constructor(
     private val converter: com.dividetask.audiobookreader.audible.download.AaxConverter,
     private val activationBytesProvider: com.dividetask.audiobookreader.audible.auth.ActivationBytesProvider,
     private val aaxImporter: com.dividetask.audiobookreader.audible.download.AaxImporter,
+    private val seriesRepository: SeriesRepository,
+    private val sortPreferences: ListSortPreferences,
     val playbackController: com.dividetask.audiobookreader.player.PlaybackController,
     private val debugLog: AppDebugLog,
     @ApplicationContext private val context: Context
@@ -58,6 +66,13 @@ class MainViewModel @Inject constructor(
     val audibleBooks: StateFlow<List<AudibleBookEntity>> = audibleBookDao.getAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val seriesIndex: StateFlow<SeriesIndex> = seriesRepository.index
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SeriesIndex())
+
+    val sortOrders: StateFlow<Map<SortTab, SortOrder>> = sortPreferences.orders
+
+    fun setSortOrder(tab: SortTab, order: SortOrder) = sortPreferences.setOrder(tab, order)
+
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
@@ -69,6 +84,15 @@ class MainViewModel @Inject constructor(
 
     val downloadProgress: StateFlow<DownloadProgress?> = downloadManager.downloadProgress
     val queuedAsins: StateFlow<Set<String>> = downloadManager.queuedAsins
+    // A book downloading from the website isn't waiting on Audible's limit meanwhile
+    val pendingDownloads = combine(downloadManager.pendingDownloads, aaxImporter.websiteAsin) { pending, asin ->
+        if (asin == null) pending else pending - asin
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, downloadManager.pendingDownloads.value)
+    val websiteOffer = downloadManager.websiteOffer
+
+    fun dismissWebsiteOffer() = downloadManager.dismissWebsiteOffer()
+
+    fun removePending(asin: String) = downloadManager.removePending(asin)
 
     val isAudibleAuthenticated: Boolean
         get() = tokenStore.isAuthenticated
@@ -76,10 +100,19 @@ class MainViewModel @Inject constructor(
     private var lastSyncTime = 0L
     private val syncCooldownMs = 300_000L // 5 minutes
 
-    fun syncAudibleLibrary() {
+    /**
+     * Opening a tab syncs at most every 5 minutes; [force] (pull to refresh) fetches unless
+     * the last sync was under 30 s ago, so a pull right after opening the tab isn't a
+     * second library request.
+     */
+    fun syncAudibleLibrary(force: Boolean = false) {
         if (!tokenStore.isAuthenticated || _isSyncing.value) return
         val now = System.currentTimeMillis()
-        if (now - lastSyncTime < syncCooldownMs) return
+        val cooldown = if (force) FORCED_SYNC_COOLDOWN_MS else syncCooldownMs
+        if (now - lastSyncTime < cooldown) {
+            if (force) debugLog.log("SYNC", "Library synced ${(now - lastSyncTime) / 1000}s ago — not fetching again")
+            return
+        }
         lastSyncTime = now
 
         viewModelScope.launch {
@@ -97,6 +130,7 @@ class MainViewModel @Inject constructor(
                     debugLog.log("SYNC", "Cache updated")
                 }
                 verifyDownloadedFiles()
+                seriesRepository.refresh()
             } catch (e: Exception) {
                 debugLog.log("SYNC", "Error: ${e.message}")
             } finally {
@@ -109,32 +143,95 @@ class MainViewModel @Inject constructor(
 
     fun clearAaxImportStatus() = aaxImporter.clearStatus()
 
-    fun importLocalBook(uri: Uri) {
+    /** Adds the picked files, first asking if they'd leave the phone nearly full. */
+    fun importLocalBooks(uris: List<Uri>) {
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val name = displayName(uri)
-                if (name.endsWith(".aax", ignoreCase = true)) {
-                    // Copied into the app, converted, and matched to the Audible library
-                    aaxImporter.import(uri, name)
-                    return@launch
-                }
-                context.contentResolver.takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-                val existing = bookRepository.getBookByFileUri(uri.toString())
-                if (existing != null) {
-                    _importError.value = "Book already in library"
-                    return@launch
-                }
-                val metadata = metadataExtractor.extract(uri)
-                val bookEntity = metadataExtractor.toBookEntity(uri, metadata)
-                val chapters = metadataExtractor.toChapterEntities(0, metadata)
-                bookRepository.insertBook(bookEntity, chapters)
-            } catch (e: Exception) {
-                _importError.value = "Failed to import: ${e.message}"
-            }
+            val bytes = uris.sumOf { sizeOf(it).coerceAtLeast(0) }
+            val what = if (uris.size == 1) "\"${displayName(uris[0]).substringBeforeLast('.')}\"" else "these ${uris.size} files"
+            withSpaceCheck(bytes, what) { addFiles(uris) }
         }
     }
+
+    /**
+     * Picked files can be several books, some split into parts (e.g. one file per chapter).
+     * Audio files with the same album tag are one book; files with no album tag are grouped
+     * by folder. A book of several files is joined into one; .aax files are each their own
+     * book. An image is used as the cover of the books in its folder.
+     */
+    private fun addFiles(uris: List<Uri>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val files = uris.map { PickedFile(it, displayName(it), folderOf(it)) }
+            // A single file is a book whatever its name says
+            if (files.size == 1) return@launch addBook(files, emptyList())
+            fun isType(f: PickedFile, exts: List<String>) = exts.any { f.name.endsWith(".$it", ignoreCase = true) }
+            val images = files.filter { isType(it, IMAGE_EXTENSIONS) }
+            files.filter { it.name.endsWith(".aax", ignoreCase = true) }.forEach { addBook(listOf(it), emptyList()) }
+            val books = files.filter { isType(it, AUDIO_EXTENSIONS) }.groupBy { f ->
+                metadataExtractor.readAlbum(f.uri)?.let { "album:" + SeriesIndex.normalize(it) } ?: "folder:${f.folder}"
+            }.values
+            debugLog.log("IMPORT", "Picked ${files.size} files: ${books.size} book(s) of ${books.joinToString { it.size.toString() }} file(s)")
+            for (parts in books) addBook(parts, images.filter { it.folder == parts[0].folder })
+        }
+    }
+
+    /**
+     * Adds one book, copied into the app: a .aax file, a single audio file, or several joined.
+     * If the library already has a book with that title and author, asks whether to replace
+     * it, since only one copy should exist.
+     */
+    private suspend fun addBook(parts: List<PickedFile>, cover: List<PickedFile>) {
+        val first = parts[0]
+        try {
+            // Matched to the Audible library, which turns away a book already downloaded
+            if (first.name.endsWith(".aax", ignoreCase = true)) return aaxImporter.import(first.uri, first.name)
+            val (tagTitle, author) = metadataExtractor.readTitleAuthor(first.uri)
+            // A book in several files is named by its album tag; its title tags name chapters
+            val title = (if (parts.size > 1) metadataExtractor.readAlbum(first.uri) else tagTitle)
+                ?: first.name.substringBeforeLast('.')
+            val existing = bookRepository.getAllBooksOnce().firstOrNull {
+                SeriesIndex.normalize(it.title) == SeriesIndex.normalize(title) &&
+                    (author == null || SeriesIndex.normalize(it.author) == SeriesIndex.normalize(author))
+            }
+            if (existing != null && !askReplace(existing.title)) {
+                debugLog.log("IMPORT", "Not added: \"$title\" is already in the library")
+                return
+            }
+            if (parts.size == 1) {
+                aaxImporter.importCopy(first.uri, first.name, replaces = existing?.id)
+            } else {
+                aaxImporter.importJoined((parts + cover).map { it.uri to it.name }, replaces = existing?.id)
+            }
+        } catch (e: Exception) {
+            _importError.value = "Failed to import: ${e.message}"
+        }
+    }
+
+    /** Asks whether to replace a book already in the library; null when nothing is being asked. */
+    data class DuplicatePrompt(val title: String, val answer: kotlinx.coroutines.CompletableDeferred<Boolean>)
+
+    private val _duplicatePrompt = MutableStateFlow<DuplicatePrompt?>(null)
+    val duplicatePrompt: StateFlow<DuplicatePrompt?> = _duplicatePrompt.asStateFlow()
+
+    private suspend fun askReplace(title: String): Boolean {
+        val prompt = DuplicatePrompt(title, kotlinx.coroutines.CompletableDeferred())
+        _duplicatePrompt.value = prompt
+        return prompt.answer.await().also { _duplicatePrompt.value = null }
+    }
+
+    fun answerDuplicate(replace: Boolean) {
+        _duplicatePrompt.value?.answer?.complete(replace)
+    }
+
+    private class PickedFile(val uri: Uri, val name: String, val folder: String)
+
+    /** The folder a picked file is in, from its document ID (e.g. "728D-3099:Books/One/01.mp3"). */
+    private fun folderOf(uri: Uri): String = try {
+        android.provider.DocumentsContract.getDocumentId(uri).substringBeforeLast('/', "")
+    } catch (e: Exception) {
+        ""
+    }
+
+    fun importLocalBook(uri: Uri) = addFiles(listOf(uri))
 
     private fun displayName(uri: Uri): String {
         context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
@@ -142,8 +239,34 @@ class MainViewModel @Inject constructor(
         return uri.lastPathSegment ?: ""
     }
 
+    /**
+     * Removes the book and deletes its file if the app made it (Audible downloads,
+     * imports). Files picked from the phone's own storage are left alone.
+     */
     fun deleteLocalBook(bookId: Long) {
-        viewModelScope.launch { bookRepository.deleteBook(bookId) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val book = bookRepository.getBookById(bookId)
+            bookRepository.deleteBook(bookId)
+            book ?: return@launch
+            val uri = Uri.parse(book.fileUri)
+            val appDir = context.getExternalFilesDir(null)?.canonicalPath
+            val path = uri.path
+            if (uri.scheme == "file" && path != null && appDir != null) {
+                val file = java.io.File(path).canonicalFile
+                if (file.path.startsWith(appDir + java.io.File.separator)) {
+                    // An Audible book may also still have its .aax next to the converted file
+                    listOf(file, java.io.File(file.parentFile, "${file.nameWithoutExtension}.aax"))
+                        .filter { it.exists() && it.delete() }
+                        .forEach { debugLog.log("LIB", "Deleted file: ${it.name}") }
+                }
+            } else if (uri.scheme == "content") {
+                try {
+                    context.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (e: SecurityException) {
+                    // Permission was never persisted
+                }
+            }
+        }
     }
 
     fun downloadAudibleBook(audibleBook: AudibleBookEntity) {
@@ -156,8 +279,54 @@ class MainViewModel @Inject constructor(
                 com.dividetask.audiobookreader.audible.api.AudibleImages(image500 = it)
             }
         )
-        downloadManager.queueDownload(book)
+        // Audible's .aax files are about 64 kbit/s: 8 KB a second
+        val estimate = (audibleBook.runtimeMinutes ?: 0) * 60L * 8_000L
+        withSpaceCheck(estimate, "\"${audibleBook.title}\"") { downloadManager.queueDownload(book) }
     }
+
+    /** A warning shown before adding a book that would leave the phone [FULL_WARNING] full or more. */
+    data class StorageWarning(val message: String, val proceed: () -> Unit)
+
+    private val _storageWarning = MutableStateFlow<StorageWarning?>(null)
+    val storageWarning: StateFlow<StorageWarning?> = _storageWarning.asStateFlow()
+
+    fun confirmStorageWarning() {
+        _storageWarning.value?.proceed?.invoke()
+        _storageWarning.value = null
+    }
+
+    fun dismissStorageWarning() {
+        _storageWarning.value = null
+    }
+
+    /**
+     * Runs [proceed] if [bytes] more leaves the phone under [FULL_WARNING] full; asks first if
+     * not, and refuses if it can't fit at all.
+     */
+    private fun withSpaceCheck(bytes: Long, what: String, proceed: () -> Unit) {
+        val stat = android.os.StatFs((context.getExternalFilesDir(null) ?: context.filesDir).path)
+        val total = stat.totalBytes
+        val free = stat.availableBytes
+        fun gb(b: Long) = String.format(java.util.Locale.US, "%.1f GB", b / 1e9)
+        if (bytes > free) {
+            _importError.value = "Not enough space for $what: it needs about ${gb(bytes)} and ${gb(free)} is free"
+            return
+        }
+        val fullAfter = 1.0 - (free - bytes).toDouble() / total
+        if (bytes > 0 && fullAfter >= FULL_WARNING) {
+            _storageWarning.value = StorageWarning(
+                "Adding $what (about ${gb(bytes)}) will leave your phone ${(fullAfter * 100).toInt()}% full, " +
+                    "with ${gb(free - bytes)} free. Add it anyway?",
+                proceed
+            )
+        } else {
+            proceed()
+        }
+    }
+
+    private fun sizeOf(uri: Uri): Long =
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)
+            ?.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else -1L } ?: -1L
 
     fun cancelDownload() = downloadManager.cancelDownload()
     fun isBookDownloaded(asin: String): Boolean = downloadManager.isBookDownloaded(asin)
@@ -373,4 +542,11 @@ class MainViewModel @Inject constructor(
     }
 
     fun clearError() { _importError.value = null }
+
+    private companion object {
+        val AUDIO_EXTENSIONS = listOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "wma")
+        val IMAGE_EXTENSIONS = listOf("jpg", "jpeg", "png")
+        const val FORCED_SYNC_COOLDOWN_MS = 30_000L
+        const val FULL_WARNING = 0.9
+    }
 }

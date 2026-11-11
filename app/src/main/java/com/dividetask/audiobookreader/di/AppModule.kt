@@ -5,10 +5,13 @@ import androidx.room.Room
 import com.dividetask.audiobookreader.data.db.AppDatabase
 import com.dividetask.audiobookreader.data.db.MIGRATION_1_2
 import com.dividetask.audiobookreader.data.db.MIGRATION_2_3
+import com.dividetask.audiobookreader.data.db.MIGRATION_3_4
+import com.dividetask.audiobookreader.data.db.MIGRATION_4_5
 import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.data.db.dao.BookDao
 import com.dividetask.audiobookreader.data.db.dao.ChapterDao
 import com.dividetask.audiobookreader.data.db.dao.HistoryDao
+import com.dividetask.audiobookreader.data.db.dao.SeriesDao
 import com.dividetask.audiobookreader.data.repository.BookRepository
 import com.dividetask.audiobookreader.data.repository.BookRepositoryImpl
 import dagger.Binds
@@ -30,7 +33,7 @@ object DatabaseModule {
             AppDatabase::class.java,
             "audiobook_reader.db"
         )
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .build()
     }
 
@@ -45,6 +48,9 @@ object DatabaseModule {
 
     @Provides
     fun provideHistoryDao(db: AppDatabase): HistoryDao = db.historyDao()
+
+    @Provides
+    fun provideSeriesDao(db: AppDatabase): SeriesDao = db.seriesDao()
 }
 
 @Module

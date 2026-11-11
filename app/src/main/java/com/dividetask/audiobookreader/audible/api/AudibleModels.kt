@@ -52,7 +52,12 @@ data class AudibleContentMetadata(
 
 @Serializable
 data class AudibleChapterInfo(
-    val chapters: List<AudibleChapter> = emptyList()
+    val chapters: List<AudibleChapter> = emptyList(),
+    /** Audible's spoken intro ("This is Audible") at the start of the file. */
+    val brandIntroDurationMs: Long = 0,
+    /** Audible's spoken outro at the end of the file. */
+    val brandOutroDurationMs: Long = 0,
+    @SerialName("runtime_length_ms") val runtimeLengthMs: Long = 0
 )
 
 @Serializable
@@ -72,5 +77,6 @@ fun AudibleBook.toEntity() = AudibleBookEntity(
     coverUrl = productImages?.image500 ?: productImages?.image1024,
     seriesTitle = series?.firstOrNull()?.title,
     seriesSequence = series?.firstOrNull()?.sequence,
+    seriesAsin = series?.firstOrNull()?.asin,
     purchaseDate = purchaseDate
 )

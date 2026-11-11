@@ -1,5 +1,6 @@
 package com.dividetask.audiobookreader.data.repository
 
+import android.database.sqlite.SQLiteConstraintException
 import com.dividetask.audiobookreader.data.db.dao.HistoryDao
 import com.dividetask.audiobookreader.data.db.entity.ListenSessionEntity
 import com.dividetask.audiobookreader.data.db.entity.PositionJumpEntity
@@ -27,6 +28,14 @@ class HistoryRepository @Inject constructor(
      */
     suspend fun recordJump(bookId: Long, fromPositionMs: Long, toPositionMs: Long, reason: String) {
         if (bookId < 0 || abs(toPositionMs - fromPositionMs) < 1_000) return
+        try {
+            recordJumpOrThrow(bookId, fromPositionMs, toPositionMs, reason)
+        } catch (e: SQLiteConstraintException) {
+            // The book was deleted while playing
+        }
+    }
+
+    private suspend fun recordJumpOrThrow(bookId: Long, fromPositionMs: Long, toPositionMs: Long, reason: String) {
         val now = System.currentTimeMillis()
         val latest = historyDao.getLatestJump(bookId)
         if (latest != null && now - latest.timestamp < MERGE_WINDOW_MS) {

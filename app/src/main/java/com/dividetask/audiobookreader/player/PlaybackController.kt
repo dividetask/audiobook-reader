@@ -57,15 +57,38 @@ class PlaybackController @Inject constructor(
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
+    private var connecting = false
+
     fun connect() {
+        // Opening the player again must not add a second controller (and listener)
+        if (mediaController != null || connecting) return
+        connecting = true
         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
+        val controllerFuture = MediaController.Builder(context, sessionToken)
+            .setListener(object : MediaController.Listener {
+                // The service went away: let the next connect() build a new controller
+                override fun onDisconnected(controller: MediaController) {
+                    if (mediaController === controller) {
+                        mediaController = null
+                        _isConnected.value = false
+                    }
+                }
+            })
+            .buildAsync()
         controllerFuture.addListener({
-            mediaController = controllerFuture.get()
+            mediaController = try {
+                controllerFuture.get()
+            } catch (e: Exception) {
+                debugLog.log("PLAY", "ERROR: Could not connect to player: ${e.message}")
+                null
+            }
+            connecting = false
+            if (mediaController == null) return@addListener
             _isConnected.value = true
             mediaController?.addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    debugLog.log("PLAY", "isPlaying: $isPlaying")
+                    // Verbose only: every pause and resume would fill the log
+                    debugLog.log("PLAY", "isPlaying: $isPlaying", AppDebugLog.LogLevel.VERBOSE)
                     updateState()
                 }
 
@@ -77,7 +100,7 @@ class PlaybackController @Inject constructor(
                         Player.STATE_ENDED -> "ENDED"
                         else -> "UNKNOWN($state)"
                     }
-                    debugLog.log("PLAY", "State: $stateName")
+                    debugLog.log("PLAY", "State: $stateName", AppDebugLog.LogLevel.VERBOSE)
                     updateState()
                 }
 
