@@ -28,8 +28,13 @@ Background and history: [AUDIBLE_DOWNLOAD_ISSUE.md](AUDIBLE_DOWNLOAD_ISSUE.md).
   registration?
 - **Rate-based:** requests too close together (bursts) regardless of total?
 - **Failed requests count too:** does each refused request extend the block?
-  (The app pauses license requests for 15 min after a refusal and retries pending
-  books at 15 min → 30 min → 1 h → 2 h → 4 h, so we can compare.)
+- **Duration probe (from v0.205 on this branch):** after a refusal, automatic license
+  requests (pending retries, the server backup) wait 1 day, then 2, 4, 8, 16, 32
+  days, doubling with each refusal. A success returns to the normal schedule but
+  keeps the last wait, so the next refusal starts there. Requests you make yourself
+  (tapping download, "Back up next Audible book now") still go out, and their result
+  counts the same way. `throttled` events name the wait; `backoff-cleared` marks the
+  first success.
 - **Other endpoints count:** do library syncs, catalog lookups (Book details
   screen, series lists) or token refreshes add to the limit?
 - **Client identity:** device type, User-Agent, request body (see "Ideas not yet

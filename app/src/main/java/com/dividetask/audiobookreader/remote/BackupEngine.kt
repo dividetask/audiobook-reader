@@ -105,8 +105,11 @@ class BackupEngine @Inject constructor(
     /** Uploads every book on the phone that isn't on the server yet. Never contacts Audible. */
     suspend fun runLocal(): BackupOutcome = locked { runLocalLocked() }
 
-    /** Downloads, converts and uploads up to [maxBooks] Audible books that aren't on the phone or server. */
-    suspend fun runAudible(maxBooks: Int): BackupOutcome = locked { runAudibleLocked(maxBooks) }
+    /**
+     * Downloads, converts and uploads up to [maxBooks] Audible books that aren't on the phone
+     * or server. [force] ("Back up now") asks Audible even while backing off after a refusal.
+     */
+    suspend fun runAudible(maxBooks: Int, force: Boolean = false): BackupOutcome = locked { runAudibleLocked(maxBooks, force) }
 
     private suspend fun locked(block: suspend () -> BackupOutcome): BackupOutcome = mutex.withLock {
         withContext(Dispatchers.IO) {
@@ -197,10 +200,13 @@ class BackupEngine @Inject constructor(
             "uploaded $done" + (if (failed > 0) ", $failed failed" else ""), prefix = "Phone copies")
     }
 
-    private suspend fun runAudibleLocked(maxBooks: Int): BackupOutcome {
+    private suspend fun runAudibleLocked(maxBooks: Int, force: Boolean): BackupOutcome {
         debugLog.section("Server Backup (Audible)")
         if (!settings.isConfigured) return finish(BackupOutcome.Failed("Server not set up", retry = false))
         if (!tokenStore.isAuthenticated) return finish(BackupOutcome.Failed("Not signed in to Audible", retry = false))
+        if (!force && apiClient.isThrottled) {
+            return finish(BackupOutcome.Failed(apiClient.throttleMessage(), retry = false), prefix = "Audible")
+        }
 
         setStatus(BackupStatus(BackupPhase.CHECKING, "Checking for new books"))
 
@@ -241,7 +247,7 @@ class BackupEngine @Inject constructor(
             currentCoroutineContext().ensureActive()
             val remaining = pending.size - i
             try {
-                backUpBook(book, remaining)
+                backUpBook(book, remaining, force)
                 done++
                 settings.failures = settings.failures - book.asin
                 debugLog.log("BACKUP", "Backed up: ${book.title}")
@@ -274,7 +280,7 @@ class BackupEngine @Inject constructor(
         return outcome
     }
 
-    private suspend fun backUpBook(book: AudibleBookEntity, remaining: Int) {
+    private suspend fun backUpBook(book: AudibleBookEntity, remaining: Int, force: Boolean) {
         val title = book.title
         val estimate = (book.runtimeMinutes ?: 500) * 1_000_000L
         val free = StatFs(workDir.absolutePath).availableBytes
@@ -290,7 +296,7 @@ class BackupEngine @Inject constructor(
         }
 
         val output = converted ?: run {
-            val result = apiClient.getDownloadUrl(book.asin)
+            val result = apiClient.getDownloadUrl(book.asin, force)
             val info = result.data ?: run {
                 // A throttle applies to every book, so stop the run rather than burn through the list
                 if (apiClient.isThrottled) throw AudibleThrottledException(apiClient.throttleMessage())

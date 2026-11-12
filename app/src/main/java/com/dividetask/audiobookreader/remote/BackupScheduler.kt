@@ -105,7 +105,7 @@ class BackupScheduler @Inject constructor(
             .build()
         val request = OneTimeWorkRequestBuilder<BackupWorker>()
             .setConstraints(constraints)
-            .setInputData(workDataOf(BackupWorker.KEY_MODE to BackupWorker.MODE_AUDIBLE))
+            .setInputData(workDataOf(BackupWorker.KEY_MODE to BackupWorker.MODE_AUDIBLE, BackupWorker.KEY_FORCE to true))
             .build()
         workManager.enqueueUniqueWork(NOW, ExistingWorkPolicy.KEEP, request)
     }

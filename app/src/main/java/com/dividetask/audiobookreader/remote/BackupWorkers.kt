@@ -30,7 +30,8 @@ class BackupWorker @AssistedInject constructor(
             // The work still runs; if stopped, it resumes from partial files next time.
             Log.w("BackupWorker", "Could not run in foreground: ${e.message}")
         }
-        val outcome = if (local) engine.runLocal() else engine.runAudible(maxBooks = 1)
+        val outcome = if (local) engine.runLocal()
+            else engine.runAudible(maxBooks = 1, force = inputData.getBoolean(KEY_FORCE, false))
         return when (outcome) {
             BackupOutcome.AllDone, BackupOutcome.MoreRemaining -> Result.success()
             is BackupOutcome.Failed -> if (outcome.retry && local) Result.retry() else Result.failure()
@@ -43,6 +44,8 @@ class BackupWorker @AssistedInject constructor(
         const val KEY_MODE = "mode"
         const val MODE_LOCAL = "local"
         const val MODE_AUDIBLE = "audible"
+        /** "Back up now": ask Audible even while backing off after a refusal. */
+        const val KEY_FORCE = "force"
     }
 }
 
