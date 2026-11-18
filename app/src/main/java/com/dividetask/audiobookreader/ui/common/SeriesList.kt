@@ -82,7 +82,7 @@ fun <T> groupBySeries(
             }
             // Books on the tab that the catalog's list doesn't include
             val extra = remaining.map { (item, ref) -> SeriesMember(ref.asin, titleOf(item), ref.sequence, coverOf(item), item) }
-            val members = (listed + extra).sortedWith(
+            val members = dropRepeats(listed + extra, index).sortedWith(
                 compareBy<SeriesMember<T>, Double?>(nullsLast<Double>()) { SeriesIndex.sequenceNumber(it.sequence) }
                     .thenBy(String.CASE_INSENSITIVE_ORDER) { it.title }
             )
@@ -111,6 +111,18 @@ fun <T> groupBySeries(
 }
 
 /**
+ * Audible lists most books in a series several times under different ASINs (other
+ * editions, other marketplaces), all with the same title and number. Keeps one row per
+ * book: the copies on this tab, else the one in the Audible library, else Audible's first.
+ */
+private fun <T> dropRepeats(members: List<SeriesMember<T>>, index: SeriesIndex): List<SeriesMember<T>> =
+    members.groupBy { SeriesIndex.normalize(it.title) + "|" + it.sequence.orEmpty() }.values.flatMap { same ->
+        same.filter { it.item != null }.ifEmpty {
+            listOf(same.firstOrNull { m -> m.asin?.let { it in index.libraryByAsin } == true } ?: same.first())
+        }
+    }
+
+/**
  * Adds [entries] to the list. A series is one row that expands, when tapped, into its
  * titles: [book] draws the ones the tab has, [missing] the rest.
  */
@@ -118,6 +130,8 @@ fun <T> LazyListScope.bookListEntries(
     entries: List<BookListEntry<T>>,
     expandedSeries: Set<String>,
     onToggleSeries: (String) -> Unit,
+    /** A short status under a series' name, e.g. that one of its books is downloading. */
+    headerNote: (BookListEntry.Series<T>) -> String? = { null },
     keyOf: (T) -> Any,
     book: @Composable (T) -> Unit,
     missing: @Composable (SeriesMember<T>) -> Unit
@@ -128,7 +142,7 @@ fun <T> LazyListScope.bookListEntries(
             is BookListEntry.Series -> {
                 val expanded = entry.seriesAsin in expandedSeries
                 item(key = "series_${entry.seriesAsin}") {
-                    SeriesHeaderItem(entry, expanded, onClick = { onToggleSeries(entry.seriesAsin) })
+                    SeriesHeaderItem(entry, expanded, headerNote(entry), onClick = { onToggleSeries(entry.seriesAsin) })
                 }
                 if (expanded) {
                     entry.members.forEach { member ->
@@ -146,7 +160,7 @@ fun <T> LazyListScope.bookListEntries(
 }
 
 @Composable
-private fun SeriesHeaderItem(series: BookListEntry.Series<*>, expanded: Boolean, onClick: () -> Unit) {
+private fun SeriesHeaderItem(series: BookListEntry.Series<*>, expanded: Boolean, note: String?, onClick: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
@@ -167,6 +181,7 @@ private fun SeriesHeaderItem(series: BookListEntry.Series<*>, expanded: Boolean,
                 val count = series.members.size
                 Text("Series · $count ${if (count == 1) "book" else "books"} · ${series.ownedCount} owned",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                note?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary) }
             }
             Icon(
                 if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,

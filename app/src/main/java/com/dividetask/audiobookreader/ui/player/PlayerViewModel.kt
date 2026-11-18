@@ -29,6 +29,7 @@ import javax.inject.Inject
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class PlayerViewModel @Inject constructor(
+    private val savedState: androidx.lifecycle.SavedStateHandle,
     private val bookRepository: BookRepository,
     private val historyRepository: HistoryRepository,
     private val chapterLoader: ChapterLoader,
@@ -76,6 +77,13 @@ class PlayerViewModel @Inject constructor(
             launch { chapterLoader.ensureChapters(bookEntity) }
 
             playbackController.connect()
+
+            // Android brings this screen back after the app was closed; it then shows its
+            // book paused instead of starting it, and the mini player shows the same book
+            if (savedState.get<Boolean>(STARTED_KEY) == true) {
+                playbackController.restoreLastBook(bookEntity, replace = true)
+            }
+            savedState[STARTED_KEY] = true
 
             viewModelScope.launch {
                 playbackController.isConnected.collect { connected ->
@@ -145,6 +153,8 @@ class PlayerViewModel @Inject constructor(
     fun jumpToChapter(index: Int) {
         val chapter = chapters.value.getOrNull(index) ?: return
         playbackController.seekTo(chapter.startPositionMs, "Chapter list")
+        // Picking a chapter means listening to it
+        playbackController.resume()
     }
 
     fun jumpToHistory(positionMs: Long) {
@@ -158,6 +168,11 @@ class PlayerViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         positionUpdateJob?.cancel()
+    }
+
+    private companion object {
+        /** Set once this screen has started its book, so a restored screen doesn't start it again. */
+        const val STARTED_KEY = "started"
     }
 }
 

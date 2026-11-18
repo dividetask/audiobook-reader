@@ -65,7 +65,9 @@ class AudibleDownloadManager @Inject constructor(
     private val converter: AaxConverter,
     private val activationBytesProvider: ActivationBytesProvider,
     private val pendingStore: PendingDownloadStore,
-    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog
+    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog,
+    // Lazy: only used when retrying and after a download
+    private val aaxImporter: dagger.Lazy<AaxImporter>
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -131,6 +133,10 @@ class AudibleDownloadManager @Inject constructor(
                         completedAsins.add(uri.substringAfterLast("/").substringBeforeLast("."))
                     }
                 }
+                // A book imported another way (e.g. from the website) is no longer waiting to download
+                _downloadProgress.value?.takeIf { it.state == DownloadState.ERROR && it.asin in completedAsins }?.let {
+                    _downloadProgress.value = null
+                }
             }
         }
     }
@@ -178,9 +184,13 @@ class AudibleDownloadManager @Inject constructor(
 
     private var activeAsin: String? = null
 
+    /** Books you asked for yourself: they ask Audible even while backing off (the result still counts). */
+    private val manualAsins = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     fun queueDownload(book: AudibleBook) {
         requestLog.event("download-requested", "${book.asin}${if (retrying) " (automatic retry)" else ""}")
-        if (apiClient.isThrottled) {
+        if (!retrying) manualAsins += book.asin
+        if (apiClient.isThrottled && retrying) {
             // Don't add to the throttle by asking now; try once the limit should be over
             debugLog.log("DL", "Throttled — pending: ${book.title}")
             val pending = markPending(book, turnedAway = false)
@@ -216,6 +226,7 @@ class AudibleDownloadManager @Inject constructor(
                 // Stays pending only while the download limit is what's stopping it
                 if (throttledAsin != book.asin) pendingStore.remove(book.asin)
             } finally {
+                manualAsins -= book.asin
                 activeAsin = null
                 currentDownloadJob = null
                 isProcessing = false
@@ -411,10 +422,12 @@ class AudibleDownloadManager @Inject constructor(
                         val authorName = book.authors?.firstOrNull()?.name ?: "Unknown Author"
                         val durationMs = (book.runtimeLengthMin ?: 0) * 60_000L
 
-                        bookRepository.insertBook(BookEntity(
+                        val id = bookRepository.insertBook(BookEntity(
                             title = title, author = authorName, coverUri = bookCoverUrl,
                             fileUri = android.net.Uri.fromFile(m4bFile).toString(), durationMs = durationMs
                         ), emptyList())
+                        // Only one copy of a book
+                        aaxImporter.get().removeOtherCopies(id)
                         completedAsins.add(asin)
                         dl("Complete — added to library")
 
@@ -433,10 +446,12 @@ class AudibleDownloadManager @Inject constructor(
                 val authorName = book.authors?.firstOrNull()?.name ?: "Unknown Author"
                 val durationMs = (book.runtimeLengthMin ?: 0) * 60_000L
 
-                bookRepository.insertBook(BookEntity(
+                val id = bookRepository.insertBook(BookEntity(
                     title = title, author = authorName, coverUri = bookCoverUrl,
                     fileUri = android.net.Uri.fromFile(outputFile).toString(), durationMs = durationMs
                 ), emptyList())
+                // Only one copy of a book
+                aaxImporter.get().removeOtherCopies(id)
                 completedAsins.add(asin)
                 dl("Saved as AAX (conversion unavailable)")
 
@@ -506,7 +521,7 @@ class AudibleDownloadManager @Inject constructor(
     private suspend fun fetchDownloadInfo(asin: String, log: MutableList<String>): com.dividetask.audiobookreader.audible.api.DownloadInfo? {
         fun dl(msg: String) { log.add(msg); debugLog.log("DL", msg) }
         dl("Getting download URL...")
-        val result = apiClient.getDownloadUrl(asin)
+        val result = apiClient.getDownloadUrl(asin, force = asin in manualAsins)
         result.debugLog.forEach { debugLog.log("DL", it) }
         val info = result.data
         lastLicenseError = result.error
@@ -553,8 +568,11 @@ class AudibleDownloadManager @Inject constructor(
     private fun pendingMessage(pending: PendingDownload) =
         "Audible is limiting downloads. \"${pending.title}\" will download automatically — next try ${timeText(pending.nextAttemptAt)}."
 
-    private fun timeText(millis: Long): String =
-        java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(java.util.Date(millis))
+    private fun timeText(millis: Long): String {
+        // Days away while backing off after a refusal, so show the day too
+        val pattern = if (millis - System.currentTimeMillis() > 20 * 60 * 60 * 1000L) "EEE MMM d, h:mm a" else "h:mm a"
+        return java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault()).format(java.util.Date(millis))
+    }
 
     /** True while [retryDuePending] runs; it reschedules when done (rescheduling now would cancel it). */
     @Volatile private var retrying = false
@@ -614,6 +632,11 @@ class AudibleDownloadManager @Inject constructor(
             if (apiClient.isThrottled) {
                 debugLog.log("DL", "Still limited by Audible — trying the rest later")
                 break
+            }
+            // Already coming from the website: asking the API too would only use up a request
+            if (pending.asin == aaxImporter.get().websiteAsin.value) {
+                debugLog.log("DL", "Not retrying ${pending.title}: downloading from the website")
+                continue
             }
             if (i > 0) delay(kotlin.random.Random.nextLong(60_000, 180_000))
             val book = AudibleBook(

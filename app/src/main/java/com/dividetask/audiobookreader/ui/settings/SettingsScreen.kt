@@ -293,7 +293,7 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // === Server (SFTP) ===
+            // === Server sync (SFTP or S3) ===
             ServerSettingsSection()
 
             Spacer(modifier = Modifier.height(24.dp))

@@ -6,6 +6,7 @@ import com.dividetask.audiobookreader.data.db.AppDatabase
 import com.dividetask.audiobookreader.data.db.MIGRATION_1_2
 import com.dividetask.audiobookreader.data.db.MIGRATION_2_3
 import com.dividetask.audiobookreader.data.db.MIGRATION_3_4
+import com.dividetask.audiobookreader.data.db.MIGRATION_4_5
 import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.data.db.dao.BookDao
 import com.dividetask.audiobookreader.data.db.dao.ChapterDao
@@ -32,7 +33,7 @@ object DatabaseModule {
             AppDatabase::class.java,
             "audiobook_reader.db"
         )
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .build()
     }
 

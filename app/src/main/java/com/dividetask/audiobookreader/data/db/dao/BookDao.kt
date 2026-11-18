@@ -26,6 +26,9 @@ interface BookDao {
     @Query("UPDATE books SET chaptersChecked = 1 WHERE id = :bookId")
     suspend fun setChaptersChecked(bookId: Long)
 
+    @Query("UPDATE books SET asin = :asin WHERE id = :bookId")
+    suspend fun setAsin(bookId: Long, asin: String)
+
     @Query("DELETE FROM books WHERE id = :id")
     suspend fun delete(id: Long)
 

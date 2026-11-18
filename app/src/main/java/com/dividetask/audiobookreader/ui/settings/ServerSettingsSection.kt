@@ -39,7 +39,10 @@ import com.dividetask.audiobookreader.remote.BackupPhase
 import com.dividetask.audiobookreader.remote.BackupScheduler
 import com.dividetask.audiobookreader.remote.ServerAddress
 import com.dividetask.audiobookreader.remote.ServerSettings
+import com.dividetask.audiobookreader.remote.RemoteStorage
+import com.dividetask.audiobookreader.remote.S3Client
 import com.dividetask.audiobookreader.remote.SftpClient
+import com.dividetask.audiobookreader.remote.StorageKind
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
@@ -52,7 +55,7 @@ import javax.inject.Inject
 @HiltViewModel
 class ServerSettingsViewModel @Inject constructor(
     private val settings: ServerSettings,
-    private val sftp: SftpClient,
+    private val storage: RemoteStorage,
     private val scheduler: BackupScheduler,
     engine: BackupEngine
 ) : ViewModel() {
@@ -62,6 +65,14 @@ class ServerSettingsViewModel @Inject constructor(
     var username by mutableStateOf(settings.username)
     var password by mutableStateOf(settings.password)
     var folder by mutableStateOf(settings.folder)
+    var kind by mutableStateOf(settings.storageKind)
+    var s3Endpoint by mutableStateOf(settings.s3Endpoint)
+    var s3Region by mutableStateOf(settings.s3Region)
+    var s3AccessKey by mutableStateOf(settings.s3AccessKey)
+    var s3SecretKey by mutableStateOf(settings.s3SecretKey)
+    var s3Bucket by mutableStateOf(settings.s3Bucket)
+    var syncWifiOnly by mutableStateOf(settings.syncWifiOnly)
+        private set
     var testStatus by mutableStateOf("")
         private set
     var testing by mutableStateOf(false)
@@ -78,7 +89,9 @@ class ServerSettingsViewModel @Inject constructor(
     val status = engine.status
     val backupNowPending = scheduler.backupNowPending
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
-    val fullBackupState = scheduler.fullBackupState
+    val audibleBackupState = scheduler.audibleBackupState
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+    val localBackupState = scheduler.localBackupState
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     val lastRun: String
@@ -94,12 +107,36 @@ class ServerSettingsViewModel @Inject constructor(
     private fun failedBooks() = settings.failures.count { it.value >= BackupEngine.MAX_FAILURES }
 
     val hasUnsavedChanges: Boolean
-        get() = host.trim() != settings.host || port != settings.port.toString() || username.trim() != settings.username ||
-            password != settings.password || folder.trim() != settings.folder
+        get() = kind != settings.storageKind || folder.trim() != settings.folder || when (kind) {
+            StorageKind.SFTP -> host.trim() != settings.host || port != settings.port.toString() ||
+                username.trim() != settings.username || password != settings.password
+            StorageKind.S3 -> s3Endpoint.trim() != settings.s3Endpoint || s3Region.trim() != settings.s3Region ||
+                s3AccessKey.trim() != settings.s3AccessKey || s3SecretKey.trim() != settings.s3SecretKey ||
+                s3Bucket.trim() != settings.s3Bucket
+        }
+
+    /** Enough filled in to try connecting. */
+    val canTest: Boolean
+        get() = when (kind) {
+            StorageKind.SFTP -> host.isNotBlank() && username.isNotBlank()
+            StorageKind.S3 -> s3Endpoint.isNotBlank() && s3AccessKey.isNotBlank() && s3SecretKey.isNotBlank() && s3Bucket.isNotBlank()
+        }
+
+    /** The region the app will use when the Region field is left blank. */
+    val guessedRegion: String
+        get() = try {
+            S3Client.guessRegion(java.net.URL(S3Client.normalizeEndpoint(s3Endpoint)).host)
+        } catch (_: Exception) { "" }
 
     /** Splits a typed URL (sftp://user@host:port/path) into the separate fields, then saves. */
     fun save() {
-        ServerAddress.parse(host)?.let { addr ->
+        settings.storageKind = kind
+        settings.s3Endpoint = s3Endpoint.trim()
+        settings.s3Region = s3Region.trim()
+        settings.s3AccessKey = s3AccessKey.trim()
+        settings.s3SecretKey = s3SecretKey.trim()
+        settings.s3Bucket = s3Bucket.trim()
+        if (kind == StorageKind.SFTP) ServerAddress.parse(host)?.let { addr ->
             host = addr.host
             addr.port?.let { port = it.toString() }
             addr.user?.let { username = it }
@@ -121,7 +158,7 @@ class ServerSettingsViewModel @Inject constructor(
         testStatus = "Connecting..."
         viewModelScope.launch(Dispatchers.IO) {
             testStatus = try {
-                val result = sftp.use { conn -> conn.root to conn.listAudio().size }
+                val result = storage.use { conn -> conn.root to conn.listAudio().size }
                 "Connected — ${result.second} audio files in ${result.first}"
             } catch (e: Exception) {
                 "Failed: ${e.message}"
@@ -148,6 +185,12 @@ class ServerSettingsViewModel @Inject constructor(
         scheduler.applySchedule()
     }
 
+    fun updateSyncWifiOnly(value: Boolean) {
+        settings.syncWifiOnly = value
+        syncWifiOnly = value
+        scheduler.networkRuleChanged()
+    }
+
     fun backupNow() = scheduler.backupNow()
 
     fun cancelBackupNow() = scheduler.cancelBackupNow()
@@ -162,58 +205,114 @@ class ServerSettingsViewModel @Inject constructor(
 fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) {
     val status by viewModel.status.collectAsState()
     val backupNowPending by viewModel.backupNowPending.collectAsState()
-    val fullBackupState by viewModel.fullBackupState.collectAsState()
+    val audibleBackupState by viewModel.audibleBackupState.collectAsState()
+    val localBackupState by viewModel.localBackupState.collectAsState()
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
 
-    Text("Server (SFTP)", style = MaterialTheme.typography.titleMedium)
+    Text("Server sync", style = MaterialTheme.typography.titleMedium)
     Spacer(modifier = Modifier.height(8.dp))
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            OutlinedTextField(
-                value = viewModel.host, onValueChange = { viewModel.host = it },
-                label = { Text("Server address") },
-                placeholder = { Text("192.168.1.10 or sftp://example.com:2222") },
-                singleLine = true, modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
-            )
-            Text("IP address, hostname or URL — port, user and folder in a URL fill the fields below",
-                style = MaterialTheme.typography.bodySmall, color = muted)
-            Spacer(modifier = Modifier.height(8.dp))
-            Row {
-                OutlinedTextField(
-                    value = viewModel.username, onValueChange = { viewModel.username = it },
-                    label = { Text("Username") }, singleLine = true, modifier = Modifier.weight(1f)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                OutlinedTextField(
-                    value = viewModel.port, onValueChange = { viewModel.port = it.filter(Char::isDigit) },
-                    label = { Text("Port") }, singleLine = true, modifier = Modifier.width(96.dp),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StorageKind.entries.forEach { k ->
+                    FilterChip(selected = viewModel.kind == k, onClick = { viewModel.kind = k }, label = { Text(k.label) })
+                }
             }
             Spacer(modifier = Modifier.height(8.dp))
-            OutlinedTextField(
-                value = viewModel.password, onValueChange = { viewModel.password = it },
-                label = { Text("Password") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
-            )
+
+            when (viewModel.kind) {
+                StorageKind.SFTP -> {
+                    OutlinedTextField(
+                        value = viewModel.host, onValueChange = { viewModel.host = it },
+                        label = { Text("Server address") },
+                        placeholder = { Text("192.168.1.10 or sftp://example.com:2222") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                    )
+                    Text("IP address, hostname or URL — port, user and folder in a URL fill the fields below",
+                        style = MaterialTheme.typography.bodySmall, color = muted)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row {
+                        OutlinedTextField(
+                            value = viewModel.username, onValueChange = { viewModel.username = it },
+                            label = { Text("Username") }, singleLine = true, modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedTextField(
+                            value = viewModel.port, onValueChange = { viewModel.port = it.filter(Char::isDigit) },
+                            label = { Text("Port") }, singleLine = true, modifier = Modifier.width(96.dp),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = viewModel.password, onValueChange = { viewModel.password = it },
+                        label = { Text("Password") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                    )
+                }
+                StorageKind.S3 -> {
+                    OutlinedTextField(
+                        value = viewModel.s3Endpoint, onValueChange = { viewModel.s3Endpoint = it },
+                        label = { Text("Endpoint") },
+                        placeholder = { Text("s3.region.example.com") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                    )
+                    Text("Your provider's S3 endpoint for the bucket. Works with any S3-compatible storage.",
+                        style = MaterialTheme.typography.bodySmall, color = muted)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row {
+                        OutlinedTextField(
+                            value = viewModel.s3Bucket, onValueChange = { viewModel.s3Bucket = it },
+                            label = { Text("Bucket") }, singleLine = true, modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedTextField(
+                            value = viewModel.s3Region, onValueChange = { viewModel.s3Region = it },
+                            label = { Text("Region") }, singleLine = true, modifier = Modifier.width(140.dp),
+                            placeholder = { Text(viewModel.guessedRegion.ifEmpty { "auto" }) }
+                        )
+                    }
+                    Text("Leave Region blank to use the one in the endpoint",
+                        style = MaterialTheme.typography.bodySmall, color = muted)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = viewModel.s3AccessKey, onValueChange = { viewModel.s3AccessKey = it },
+                        label = { Text("Access key ID") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = viewModel.s3SecretKey, onValueChange = { viewModel.s3SecretKey = it },
+                        label = { Text("Secret key") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
             OutlinedTextField(
                 value = viewModel.folder, onValueChange = { viewModel.folder = it },
                 label = { Text("Folder") }, singleLine = true, modifier = Modifier.fillMaxWidth()
             )
-            Text("Relative to your home directory unless it starts with /. Books go in <Folder>/<Author>/<Title>.m4b",
-                style = MaterialTheme.typography.bodySmall, color = muted)
+            Text(
+                (if (viewModel.kind == StorageKind.SFTP) "Relative to your home directory unless it starts with /. "
+                else "Folder inside the bucket. ") + "Books go in <Folder>/<Author>/<Title>.m4b",
+                style = MaterialTheme.typography.bodySmall, color = muted
+            )
 
             Spacer(modifier = Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { viewModel.save() }, enabled = viewModel.hasUnsavedChanges, modifier = Modifier.weight(1f)) {
                     Text("Save")
                 }
-                OutlinedButton(onClick = { viewModel.testConnection() }, enabled = !viewModel.testing &&
-                    viewModel.host.isNotBlank() && viewModel.username.isNotBlank(), modifier = Modifier.weight(1f)) {
+                OutlinedButton(onClick = { viewModel.testConnection() }, enabled = !viewModel.testing && viewModel.canTest,
+                    modifier = Modifier.weight(1f)) {
                     Text("Test connection")
                 }
             }
@@ -223,12 +322,22 @@ fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) 
                     color = if (viewModel.testStatus.startsWith("Failed")) MaterialTheme.colorScheme.error
                     else MaterialTheme.colorScheme.primary)
             }
-            if (viewModel.hostKeyFingerprint.isNotEmpty()) {
+            if (viewModel.kind == StorageKind.SFTP && viewModel.hostKeyFingerprint.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Server key: ${viewModel.hostKeyFingerprint}", style = MaterialTheme.typography.bodySmall,
                         color = muted, modifier = Modifier.weight(1f))
                     TextButton(onClick = { viewModel.forgetHostKey() }) { Text("Forget") }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = viewModel.syncWifiOnly, onCheckedChange = { viewModel.updateSyncWifiOnly(it) })
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Sync only over WiFi", style = MaterialTheme.typography.bodyMedium)
+                    Text("Uploads, backups and Server-tab downloads wait for WiFi",
+                        style = MaterialTheme.typography.bodySmall, color = muted)
                 }
             }
         }
@@ -241,23 +350,27 @@ fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = viewModel.backupEnabled, onCheckedChange = { viewModel.updateBackupEnabled(it) })
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Back up Audible books to server", style = MaterialTheme.typography.bodyMedium)
-                    Text("Downloads, converts and uploads one book at a time, then deletes the phone copy. " +
-                        "Runs only on WiFi while charging and idle.",
+                    Text("Back up books to server", style = MaterialTheme.typography.bodyMedium)
+                    Text("Books on this phone are uploaded whenever there's a connection (WiFi, if set above). " +
+                        "Audible books that aren't on the phone are downloaded, converted and uploaded one at a " +
+                        "time while charging and idle, then the phone copy is deleted.",
                         style = MaterialTheme.typography.bodySmall, color = muted)
                 }
             }
             if (viewModel.backupEnabled) {
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("Check for new books", style = MaterialTheme.typography.bodyMedium)
+                Text("Download one Audible book per", style = MaterialTheme.typography.bodyMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     BackupFrequency.entries.forEach { f ->
                         FilterChip(selected = viewModel.frequency == f, onClick = { viewModel.updateFrequency(f) },
                             label = { Text(f.label) })
                     }
                 }
-                if (fullBackupState == WorkInfo.State.ENQUEUED) {
-                    Text("Backup pending — waiting for WiFi, charging and idle",
+                if (localBackupState == WorkInfo.State.ENQUEUED) {
+                    Text("Phone copies waiting for a connection", style = MaterialTheme.typography.bodySmall, color = muted)
+                }
+                if (audibleBackupState == WorkInfo.State.ENQUEUED) {
+                    Text("Next Audible book waiting for charging and idle",
                         style = MaterialTheme.typography.bodySmall, color = muted)
                 }
             }
@@ -270,7 +383,7 @@ fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) 
             } else {
                 Button(onClick = { viewModel.backupNow() }, enabled = !backupNowPending && status.phase == BackupPhase.IDLE,
                     modifier = Modifier.fillMaxWidth()) {
-                    Text("Back up one book now")
+                    Text("Back up next Audible book now")
                 }
             }
 
@@ -285,7 +398,7 @@ fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) 
                 Text(if (action.isEmpty()) status.title else "$action: ${status.title}",
                     style = MaterialTheme.typography.bodySmall)
                 if (status.remaining > 0) {
-                    Text("${status.remaining} books left to back up", style = MaterialTheme.typography.bodySmall, color = muted)
+                    Text("${status.remaining} books left", style = MaterialTheme.typography.bodySmall, color = muted)
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 if (status.total > 0) {

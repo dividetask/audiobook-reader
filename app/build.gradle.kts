@@ -26,7 +26,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = (System.currentTimeMillis() / 60000).toInt()
-        versionName = "v0.124 a" + if (gitCommit.isNotEmpty()) " ($gitCommit)" else ""
+        versionName = "v0.210 b" + if (gitCommit.isNotEmpty()) " ($gitCommit)" else ""
 
         buildConfigField("long", "BUILD_TIMESTAMP", "${System.currentTimeMillis()}L")
     }
@@ -101,6 +101,7 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.5")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-process:2.8.7")
 
     // Media3 / ExoPlayer
     implementation("androidx.media3:media3-exoplayer:1.5.1")

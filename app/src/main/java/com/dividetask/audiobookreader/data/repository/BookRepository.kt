@@ -17,4 +17,5 @@ interface BookRepository {
     suspend fun getChaptersOnce(bookId: Long): List<ChapterEntity>
     suspend fun replaceChapters(bookId: Long, chapters: List<ChapterEntity>)
     suspend fun setChaptersChecked(bookId: Long)
+    suspend fun setAsin(bookId: Long, asin: String)
 }

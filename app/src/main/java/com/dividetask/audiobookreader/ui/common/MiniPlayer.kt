@@ -31,7 +31,10 @@ import com.dividetask.audiobookreader.player.PlaybackController
 import com.dividetask.audiobookreader.player.PlaybackPreferences
 import com.dividetask.audiobookreader.player.PlaybackState
 import dagger.hilt.android.lifecycle.HiltViewModel
+import com.dividetask.audiobookreader.data.repository.BookRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -39,13 +42,28 @@ import javax.inject.Inject
 @HiltViewModel
 class MiniPlayerViewModel @Inject constructor(
     private val playbackController: PlaybackController,
-    playbackPreferences: PlaybackPreferences
+    playbackPreferences: PlaybackPreferences,
+    bookRepository: BookRepository
 ) : ViewModel() {
     val playbackState: StateFlow<PlaybackState> = playbackController.playbackState
     val skipBackSeconds: StateFlow<Int> = playbackPreferences.skipBackSeconds
     val skipForwardSeconds: StateFlow<Int> = playbackPreferences.skipForwardSeconds
 
     init {
+        // After a restart or update, show the book you were last listening to
+        viewModelScope.launch {
+            val last = withContext(Dispatchers.IO) {
+                bookRepository.getAllBooksOnce()
+                    .filter { it.lastPlayed > 0 }
+                    .sortedByDescending { it.lastPlayed }
+                    .firstOrNull { book ->
+                        val uri = android.net.Uri.parse(book.fileUri)
+                        uri.scheme != "file" || java.io.File(uri.path ?: "").exists()
+                    }
+            }
+            last?.let { playbackController.restoreLastBook(it) }
+            playbackController.connect()
+        }
         // Keep the progress bar moving on screens that don't poll the player themselves
         viewModelScope.launch {
             while (true) {

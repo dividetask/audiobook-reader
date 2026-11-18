@@ -24,7 +24,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -61,20 +65,30 @@ class BackgroundWork @Inject constructor(
         else -> null
     }
 
+    /** Whether the app is on screen: Android only lets it start the service then. */
+    private val onScreen = MutableStateFlow(false)
+
     /**
-     * Starts [BackgroundWorkService] whenever work begins. Work always begins from a
-     * tap in the app, so the app is in the foreground and may start the service.
+     * Starts [BackgroundWorkService] whenever work begins. Android refuses that while the
+     * app isn't on screen (e.g. the user left during a website download, or an automatic
+     * retry started it), so it's tried again each time the app comes back on screen while
+     * the work is still running.
      */
     fun startWatching() {
+        ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, event ->
+            onScreen.value = event.targetState.isAtLeast(Lifecycle.State.STARTED)
+        })
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
-            activity.map { it != null }.distinctUntilChanged().collect { busy ->
-                if (!busy) return@collect
-                try {
-                    ContextCompat.startForegroundService(context, Intent(context, BackgroundWorkService::class.java))
-                } catch (e: Exception) {
-                    debugLog.log("BG", "Could not start background service: ${e.message}")
+            combine(activity.map { it != null }, onScreen) { busy, shown -> busy to shown }
+                .distinctUntilChanged()
+                .collect { (busy, shown) ->
+                    if (!busy) return@collect
+                    try {
+                        ContextCompat.startForegroundService(context, Intent(context, BackgroundWorkService::class.java))
+                    } catch (e: Exception) {
+                        debugLog.log("BG", "Could not start background service${if (shown) "" else " while the app isn't on screen; will start it when the app is opened"}: ${e.message}")
+                    }
                 }
-            }
         }
     }
 }

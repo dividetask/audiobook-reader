@@ -33,7 +33,12 @@ data class RemoteFile(val relPath: String, val size: Long, val modified: Long) {
 }
 
 /** Readable error for anything that goes wrong talking to the server. */
-class ServerException(message: String, cause: Throwable? = null) : IOException(message, cause)
+class ServerException(
+    message: String,
+    cause: Throwable? = null,
+    /** Wrong or missing settings (bucket, key, password…): retrying won't help until they change. */
+    val settingsProblem: Boolean = false
+) : IOException(message, cause)
 
 val AUDIO_EXTENSIONS = setOf("m4b", "m4a", "mp3", "aac", "flac", "ogg", "opus", "wav", "aax")
 
@@ -44,7 +49,7 @@ class SftpClient @Inject constructor(
 ) {
     /** Opens a connection, runs [block], and always disconnects. Blocking — call from Dispatchers.IO. */
     fun <T> use(block: (SftpConnection) -> T): T {
-        if (!settings.isConfigured) throw ServerException("Server not set up — add it in Settings")
+        if (!settings.sftpConfigured) throw ServerException("Server not set up — add it in Settings", settingsProblem = true)
         val host = settings.host
         val port = settings.port
         val hostId = "$host:$port"
@@ -81,16 +86,23 @@ class SftpClient @Inject constructor(
                 channel.disconnect()
             }
         } catch (e: ServerException) {
-            throw e
+            throw logged(e)
         } catch (e: JSchChangedHostKeyException) {
-            throw ServerException("Server key changed — if you reinstalled the server, tap \"Forget server key\" in Settings", e)
+            throw logged(ServerException("Server key changed — if you reinstalled the server, tap \"Forget server key\" in Settings", e, settingsProblem = true))
         } catch (e: JSchException) {
-            throw ServerException(describe(e), e)
+            val message = describe(e)
+            throw logged(ServerException(message, e, settingsProblem = message == WRONG_LOGIN))
         } catch (e: SftpException) {
-            throw ServerException("SFTP error: ${e.message}", e)
+            throw logged(ServerException("SFTP error: ${e.message}", e))
         } finally {
             session.disconnect()
         }
+    }
+
+    /** Connection errors are otherwise shown only on screen, so record them in the debug log. */
+    private fun logged(e: ServerException): ServerException {
+        debugLog.log("SFTP", "Failed: ${e.message}")
+        return e
     }
 
     private fun resolveRoot(home: String, folder: String): String {
@@ -111,7 +123,7 @@ class SftpClient @Inject constructor(
             is NoRouteToHostException -> "No route to ${settings.host} — is the server reachable from this network?"
             is SocketTimeoutException -> "Timed out connecting to ${settings.host}:${settings.port}"
             else -> when {
-                msg.contains("Auth fail", true) || msg.contains("Auth cancel", true) -> "Wrong username or password"
+                msg.contains("Auth fail", true) || msg.contains("Auth cancel", true) -> WRONG_LOGIN
                 msg.contains("Algorithm negotiation fail", true) -> "Server offers no supported key type (needs ECDSA or RSA host key)"
                 msg.contains("timeout", true) -> "Timed out connecting to ${settings.host}:${settings.port}"
                 cause != null -> "${cause::class.simpleName}: ${cause.message}"
@@ -121,6 +133,8 @@ class SftpClient @Inject constructor(
     }
 
     companion object {
+        private const val WRONG_LOGIN = "Wrong username or password"
+
         fun fingerprint(keyBase64: String): String {
             val bytes = Base64.decode(keyBase64, Base64.NO_WRAP)
             val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
@@ -129,12 +143,12 @@ class SftpClient @Inject constructor(
     }
 }
 
-class SftpConnection(private val channel: ChannelSftp, val root: String) {
+class SftpConnection(private val channel: ChannelSftp, override val root: String) : StorageConnection {
 
     private fun abs(rel: String) = if (rel.isEmpty()) root else "$root/$rel"
 
     /** Every audio file under the root folder, up to a few levels deep. */
-    fun listAudio(): List<RemoteFile> {
+    override fun listAudio(): List<RemoteFile> {
         if (stat("") == null) return emptyList()
         val out = mutableListOf<RemoteFile>()
         fun walk(rel: String, depth: Int) {
@@ -174,7 +188,7 @@ class SftpConnection(private val channel: ChannelSftp, val root: String) {
      * Uploads to "<name>.part" (resuming a previous partial upload) and renames
      * when complete, so a half-uploaded book never looks finished.
      */
-    fun upload(local: File, rel: String, progress: (Long, Long) -> Boolean) {
+    override fun upload(local: File, rel: String, progress: (Long, Long) -> Boolean) {
         rel.substringBeforeLast('/', "").let { if (it.isNotEmpty()) mkdirs(it) }
         val part = abs(rel) + ".part"
         val existing = stat("$rel.part")?.size ?: 0L
@@ -188,7 +202,7 @@ class SftpConnection(private val channel: ChannelSftp, val root: String) {
     }
 
     /** Downloads [rel] into [local], resuming if [local] already holds part of it. */
-    fun download(rel: String, local: File, total: Long, progress: (Long, Long) -> Boolean) {
+    override fun download(rel: String, local: File, total: Long, progress: (Long, Long) -> Boolean) {
         val existing = if (local.exists()) local.length() else 0L
         val mode = if (existing in 1 until total) ChannelSftp.RESUME else ChannelSftp.OVERWRITE
         channel.get(abs(rel), local.absolutePath, Monitor(total, if (mode == ChannelSftp.RESUME) existing else 0, progress), mode)

@@ -11,10 +11,10 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 enum class BackupFrequency(val label: String, val days: Long) {
-    DAILY("Daily", 1), WEEKLY("Weekly", 7), MONTHLY("Monthly", 30)
+    DAILY("Day", 1), WEEKLY("Week", 7), MONTHLY("Month", 30)
 }
 
-/** SFTP server connection details and backup preferences (encrypted at rest). */
+/** Sync storage (SFTP server or S3 bucket) and backup preferences, encrypted at rest. */
 @Singleton
 class ServerSettings @Inject constructor(
     @ApplicationContext private val context: Context
@@ -99,8 +99,59 @@ class ServerSettings @Inject constructor(
         }
         set(value) = putStr("failures", value.entries.joinToString(";") { "${it.key}=${it.value}" })
 
-    val isConfigured: Boolean
+    var storageKind: StorageKind
+        get() = StorageKind.entries.find { it.name == str("storage_kind", "") } ?: StorageKind.SFTP
+        set(value) = putStr("storage_kind", value.name)
+
+    var s3Endpoint: String
+        get() = str("s3_endpoint", "")
+        set(value) = putStr("s3_endpoint", value)
+
+    /** Blank = work it out from the endpoint. */
+    var s3Region: String
+        get() = str("s3_region", "")
+        set(value) = putStr("s3_region", value)
+
+    var s3AccessKey: String
+        get() = str("s3_access_key", "")
+        set(value) = putStr("s3_access_key", value)
+
+    var s3SecretKey: String
+        get() = str("s3_secret_key", "")
+        set(value) = putStr("s3_secret_key", value)
+
+    var s3Bucket: String
+        get() = str("s3_bucket", "")
+        set(value) = putStr("s3_bucket", value)
+
+    /** Unfinished multipart uploads, so an interrupted upload can continue: object key → upload ID. */
+    fun s3UploadId(key: String): String? = s3Uploads()[key]
+
+    fun setS3UploadId(key: String, uploadId: String?) {
+        val all = s3Uploads().toMutableMap()
+        if (uploadId == null) all.remove(key) else all[key] = uploadId
+        putStr("s3_uploads", all.entries.joinToString("\n") { "${it.key}\t${it.value}" })
+    }
+
+    private fun s3Uploads(): Map<String, String> = str("s3_uploads", "").split("\n")
+        .filter { it.contains('\t') }.associate { it.substringBefore('\t') to it.substringAfter('\t') }
+
+    /** Upload/download only on WiFi (or other unmetered networks). */
+    var syncWifiOnly: Boolean
+        get() = try { prefs.getBoolean("sync_wifi_only", true) } catch (_: Exception) { true }
+        set(value) { try { prefs.edit().putBoolean("sync_wifi_only", value).apply() } catch (_: Exception) {} }
+
+    val sftpConfigured: Boolean
         get() = host.isNotBlank() && username.isNotBlank()
+
+    val s3Configured: Boolean
+        get() = s3Endpoint.isNotBlank() && s3AccessKey.isNotBlank() && s3SecretKey.isNotBlank() && s3Bucket.isNotBlank()
+
+    val isConfigured: Boolean
+        get() = when (storageKind) {
+            StorageKind.SFTP -> sftpConfigured
+            StorageKind.S3 -> s3Configured
+        }
 }
 
 /**

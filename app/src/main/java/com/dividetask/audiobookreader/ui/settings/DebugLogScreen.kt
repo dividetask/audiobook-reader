@@ -44,6 +44,11 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import com.dividetask.audiobookreader.debug.AppDebugLog
 import com.dividetask.audiobookreader.debug.AudibleRequestLog
+import com.dividetask.audiobookreader.debug.saveToDownloads
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 
@@ -59,6 +64,7 @@ fun DebugLogScreen(
 ) {
     val entries by debugLog.entries.collectAsState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     Scaffold(
         topBar = {
@@ -70,6 +76,27 @@ fun DebugLogScreen(
                     }
                 },
                 actions = {
+                    // Both logs as files, for logs too long to paste
+                    TextButton(onClick = {
+                        val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+                        val built = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(BuildConfig.BUILD_TIMESTAMP))
+                        val debugText = "${BuildConfig.VERSION_NAME} · $built\n\n" + debugLog.getFullLog()
+                        val requestText = viewModel.requestLog.recent(Int.MAX_VALUE)
+                        scope.launch {
+                            val message = try {
+                                withContext(Dispatchers.IO) {
+                                    val a = saveToDownloads(context, "audiobook-debug-$stamp.txt", debugText)
+                                    val b = saveToDownloads(context, "audiobook-audible-$stamp.txt", requestText)
+                                    "Saved $a and $b"
+                                }
+                            } catch (e: Exception) {
+                                "Saving failed: ${e.message}"
+                            }
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    }) {
+                        Text("Save")
+                    }
                     // Saved log of every Audible request, for working out its download limit
                     TextButton(onClick = {
                         val text = viewModel.requestLog.recent()

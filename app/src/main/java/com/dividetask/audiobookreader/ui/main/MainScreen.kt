@@ -75,6 +75,7 @@ import coil.compose.AsyncImage
 import com.dividetask.audiobookreader.audible.download.DownloadProgress
 import com.dividetask.audiobookreader.data.series.SeriesIndex
 import com.dividetask.audiobookreader.audible.download.PendingDownload
+import com.dividetask.audiobookreader.ui.common.BookListEntry
 import com.dividetask.audiobookreader.ui.common.PauseIcon
 import com.dividetask.audiobookreader.ui.common.SeriesMember
 import com.dividetask.audiobookreader.ui.common.SeriesPlaceholderItem
@@ -114,8 +115,11 @@ fun MainScreen(
     }
     val isSyncing by viewModel.isSyncing.collectAsState()
     val importError by viewModel.importError.collectAsState()
+    val storageWarning by viewModel.storageWarning.collectAsState()
+    val duplicatePrompt by viewModel.duplicatePrompt.collectAsState()
     val aaxImport by viewModel.aaxImportStatus.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
+    val backgroundActivity by viewModel.backgroundActivity.collectAsState()
     val queuedAsins by viewModel.queuedAsins.collectAsState()
     val pendingDownloads by viewModel.pendingDownloads.collectAsState()
     val websiteOffer by viewModel.websiteOffer.collectAsState()
@@ -138,17 +142,22 @@ fun MainScreen(
                 downloadState = audibleProgress(owned, downloadProgress, queuedAsins),
                 pendingUntil = pendingDownloads[owned.asin]?.nextAttemptAt,
                 onDownload = { viewModel.downloadAudibleBook(owned) },
-                onDelete = { audibleBookToDelete = owned }
+                onDelete = { audibleBookToDelete = owned },
+                onCancel = {
+                    if (owned.asin in pendingDownloads) viewModel.removePending(owned.asin) else viewModel.cancelDownload()
+                },
+                onWebsite = { onWebsiteDownload(owned.asin) }
             )
         } else {
             SeriesPlaceholderItem(member, "Not purchased")
         }
     }
 
+    // Several files picked together are one book split into parts (e.g. one per chapter)
     val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let { viewModel.importLocalBook(it) }
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) viewModel.importLocalBooks(uris)
     }
 
     LaunchedEffect(importError) {
@@ -166,10 +175,13 @@ fun MainScreen(
         }
     }
 
-    // Download failures (e.g. Audible throttling) are otherwise silent on the Audible tab
+    // Download failures (e.g. Audible throttling) are otherwise silent on the Audible tab.
+    // Shown once each, not again every time the screen is opened.
+    var shownDownloadError by rememberSaveable { mutableStateOf<String?>(null) }
     LaunchedEffect(downloadProgress?.state, downloadProgress?.message) {
         val progress = downloadProgress
-        if (progress?.state == DownloadState.ERROR && progress.message != null) {
+        if (progress?.state == DownloadState.ERROR && progress.message != null && progress.message != shownDownloadError) {
+            shownDownloadError = progress.message
             snackbarHostState.showSnackbar(progress.message)
         }
     }
@@ -230,7 +242,7 @@ fun MainScreen(
         floatingActionButton = {
             if (selectedTab == 0) {
                 FloatingActionButton(onClick = {
-                    filePickerLauncher.launch(arrayOf("audio/*", "application/octet-stream", "audio/vnd.audible.aax", "audio/aax"))
+                    filePickerLauncher.launch(PICKABLE_TYPES)
                 }) {
                     Icon(Icons.Default.Add, contentDescription = "Add Book")
                 }
@@ -295,7 +307,8 @@ fun MainScreen(
                             .filter { matchesSearch(searchQuery, it.title, it.author) }
                             .sortedBy { it.nextAttemptAt },
                         onPendingWebsite = onWebsiteDownload,
-                        onPendingCancel = { viewModel.removePending(it) }
+                        onPendingCancel = { viewModel.removePending(it) },
+                        backgroundActivity = backgroundActivity
                     )
                     1 -> {
                         if (!viewModel.isAudibleAuthenticated) {
@@ -367,6 +380,28 @@ fun MainScreen(
         }
     }
 
+    // The book being added is already in the library: only one copy should exist
+    duplicatePrompt?.let { prompt ->
+        AlertDialog(
+            onDismissRequest = { viewModel.answerDuplicate(false) },
+            title = { Text("Already in your library") },
+            text = { Text("\"${prompt.title}\" is already in your library. Replace it with this file?") },
+            confirmButton = { TextButton(onClick = { viewModel.answerDuplicate(true) }) { Text("Replace") } },
+            dismissButton = { TextButton(onClick = { viewModel.answerDuplicate(false) }) { Text("Cancel") } }
+        )
+    }
+
+    // Adding a book would leave the phone nearly full
+    storageWarning?.let { warning ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissStorageWarning() },
+            title = { Text("Storage nearly full") },
+            text = { Text(warning.message) },
+            confirmButton = { TextButton(onClick = { viewModel.confirmStorageWarning() }) { Text("Add anyway") } },
+            dismissButton = { TextButton(onClick = { viewModel.dismissStorageWarning() }) { Text("Cancel") } }
+        )
+    }
+
     // A download was blocked by Audible's download limit: offer the website instead
     websiteOffer?.let { pending ->
         AlertDialog(
@@ -392,7 +427,7 @@ fun MainScreen(
             onDismissRequest = { bookToDelete = null },
             title = { Text("Remove Book") },
             text = {
-                Text("Remove \"${book.title}\" from your library? Files the app downloaded or imported are deleted; files you added from your phone are kept.")
+                Text("Remove \"${book.title}\" from your library? The app's copy of its file is deleted; the original you added it from is kept.")
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -462,7 +497,9 @@ private fun LocalBooksList(
     /** Books Audible's download limit turned away, waiting for an automatic retry. */
     pending: List<PendingDownload> = emptyList(),
     onPendingWebsite: (asin: String) -> Unit = {},
-    onPendingCancel: (asin: String) -> Unit = {}
+    onPendingCancel: (asin: String) -> Unit = {},
+    /** Server backup and server downloads, shown with the Audible downloads. */
+    backgroundActivity: List<BackgroundActivity> = emptyList()
 ) {
     val entries = remember(books, seriesIndex, sortOrder) {
         val order = when (sortOrder) {
@@ -472,9 +509,17 @@ private fun LocalBooksList(
         }
         groupBySeries(books, seriesIndex, seriesIndex::forLocal, { it.title }, { it.coverUri }, order)
     }
-    val activeDownload = downloadProgress?.takeIf { it.state in listOf(DownloadState.DOWNLOADING, DownloadState.WAITING_FOR_WIFI, DownloadState.CONVERTING) }
-    val waiting = pending.filter { it.asin != activeDownload?.asin && it.asin !in queuedAsins }
-    val hasDownloads = activeDownload != null || queuedAsins.isNotEmpty() || waiting.isNotEmpty()
+    // Books in a series on this tab show their download in the series instead of a card above
+    val inSeries = remember(entries) {
+        entries.filterIsInstance<BookListEntry.Series<*>>().flatMap { s -> s.members.mapNotNull { it.asin } }.toSet()
+    }
+    val activeDownload = downloadProgress
+        ?.takeIf { it.state in listOf(DownloadState.DOWNLOADING, DownloadState.WAITING_FOR_WIFI, DownloadState.CONVERTING) }
+        ?.takeIf { it.asin !in inSeries || it.state == DownloadState.CONVERTING }
+    val queuedHere = queuedAsins.filter { it !in inSeries }
+    val waiting = pending.filter { it.asin != downloadProgress?.asin && it.asin !in queuedAsins && it.asin !in inSeries }
+    val hasDownloads = activeDownload != null || queuedHere.isNotEmpty() || waiting.isNotEmpty() ||
+        backgroundActivity.isNotEmpty()
 
     if (books.isEmpty() && !hasDownloads) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -495,6 +540,7 @@ private fun LocalBooksList(
         ) {
             item(key = "sort") { SortMenu(SortTab.LIBRARY, sortOrder, onSortChange) }
             if (hasDownloads) {
+                items(backgroundActivity, key = { "bg_${it.key}" }) { BackgroundActivityItem(it) }
                 activeDownload?.let { progress ->
                     item(key = "dl_${progress.asin}") {
                         DownloadingBookItem(
@@ -507,7 +553,7 @@ private fun LocalBooksList(
                         )
                     }
                 }
-                items(queuedAsins.toList(), key = { "q_$it" }) { asin ->
+                items(queuedHere, key = { "q_$it" }) { asin ->
                     DownloadingBookItem(
                         title = queuedTitle(asin),
                         state = DownloadState.QUEUED,
@@ -527,6 +573,15 @@ private fun LocalBooksList(
                 entries = entries,
                 expandedSeries = expandedSeries,
                 onToggleSeries = onToggleSeries,
+                headerNote = { series ->
+                    val asins = series.members.mapNotNull { it.asin }
+                    when {
+                        downloadProgress?.asin in asins && downloadProgress?.state != DownloadState.ERROR -> "Downloading"
+                        asins.any { it in queuedAsins } -> "Download queued"
+                        pending.any { it.asin in asins } -> "Download pending"
+                        else -> null
+                    }
+                },
                 keyOf = { it.id },
                 book = { book ->
                     val (hasAax, hasConverted) = fileChecker(book)
@@ -581,6 +636,29 @@ private fun PendingBookItem(
             }
             IconButton(onClick = onCancel) {
                 Icon(Icons.Default.Close, contentDescription = "Stop retrying")
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundActivityItem(activity: BackgroundActivity) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(activity.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val percent = activity.progress?.let { " — ${(it * 100).toInt()}%" } ?: ""
+            Text(activity.detail + percent, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(modifier = Modifier.height(4.dp))
+            val fraction = activity.progress
+            if (fraction != null) {
+                LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
         }
     }
@@ -829,7 +907,11 @@ private fun AudibleBookItem(
     /** Next automatic try when Audible's download limit turned this book away. */
     pendingUntil: Long? = null,
     onDownload: () -> Unit,
-    onDelete: () -> Unit = {}
+    onDelete: () -> Unit = {},
+    /** Stops this book's download or its automatic retries; null shows no cancel button. */
+    onCancel: (() -> Unit)? = null,
+    /** Downloads it from the Audible website instead, while it's pending. */
+    onWebsite: (() -> Unit)? = null
 ) {
     Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -855,9 +937,19 @@ private fun AudibleBookItem(
                         .format(java.util.Date(pendingUntil))
                     Text("Pending — next try $time", style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFFFF9800))
+                    onWebsite?.let { TextButton(onClick = it) { Text("Download from website") } }
+                }
+            }
+            val busy = downloadState?.state in listOf(DownloadState.DOWNLOADING, DownloadState.WAITING_FOR_WIFI, DownloadState.QUEUED) ||
+                (pendingUntil != null && !isDownloaded)
+            if (busy && onCancel != null) {
+                IconButton(onClick = onCancel) {
+                    Icon(Icons.Default.Close, contentDescription = "Cancel download")
                 }
             }
             when {
+                // Pending: the cancel button above is its only action
+                pendingUntil != null && !isDownloaded && onCancel != null && downloadState == null -> {}
                 isDownloaded -> IconButton(onClick = onDelete) {
                     Icon(Icons.Default.Delete, contentDescription = "Delete download",
                         tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(28.dp))
@@ -1019,3 +1111,15 @@ private fun formatDuration(ms: Long): String {
     return if (hours > 0) String.format("%d:%02d:%02d", hours, minutes, seconds)
     else String.format("%d:%02d", minutes, seconds)
 }
+
+/**
+ * File types the add picker shows: the audio formats the app can import and JPG/PNG covers.
+ * Android can't filter by extension, and it labels .aax files (which it doesn't know) as
+ * application/octet-stream, so that has to be included too; other unknown files show with it.
+ */
+private val PICKABLE_TYPES = arrayOf(
+    "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/x-m4b", "audio/m4b", "audio/aac", "audio/aacp",
+    "audio/ogg", "audio/opus", "audio/flac", "audio/x-flac", "audio/wav", "audio/x-wav", "audio/x-ms-wma",
+    "audio/vnd.audible.aax", "audio/aax", "application/octet-stream",
+    "image/jpeg", "image/png"
+)

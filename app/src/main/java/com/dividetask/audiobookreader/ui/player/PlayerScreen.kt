@@ -37,6 +37,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -67,6 +70,7 @@ import com.dividetask.audiobookreader.data.db.entity.ChapterEntity
 import com.dividetask.audiobookreader.data.db.entity.ListenSessionEntity
 import com.dividetask.audiobookreader.data.db.entity.PositionJumpEntity
 import com.dividetask.audiobookreader.ui.common.ChapterSkipIcon
+import com.dividetask.audiobookreader.ui.common.FullScreenImage
 import com.dividetask.audiobookreader.ui.common.PauseIcon
 import com.dividetask.audiobookreader.ui.common.SkipSecondsIcon
 import java.text.SimpleDateFormat
@@ -91,6 +95,7 @@ fun PlayerScreen(
     var seekPosition by remember { mutableFloatStateOf(0f) }
     var showChapters by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    var showCover by remember { mutableStateOf(false) }
 
     LaunchedEffect(bookId) {
         viewModel.loadBook(bookId)
@@ -156,7 +161,8 @@ fun PlayerScreen(
                     AsyncImage(
                         model = book?.coverUri,
                         contentDescription = "Book cover",
-                        modifier = Modifier.fillMaxSize(),
+                        // Tap to see it full screen, with pinch to zoom
+                        modifier = Modifier.fillMaxSize().clickable { showCover = true },
                         contentScale = ContentScale.Crop
                     )
                 } else {
@@ -386,20 +392,38 @@ fun PlayerScreen(
         }
     }
 
+    if (showCover) {
+        FullScreenImage(model = book?.coverUri, contentDescription = "Book cover", onDismiss = { showCover = false })
+    }
+
+    // Full screen with a back button, not a sheet: a sheet closes on a stray swipe and
+    // loses the place in a long list
     if (showChapters) {
-        ModalBottomSheet(
+        Dialog(
             onDismissRequest = { showChapters = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
-            ChapterList(
-                chapters = chapters,
-                currentIndex = chapterIndex,
-                bookDurationMs = playbackState.durationMs,
-                onSelect = { index ->
-                    viewModel.jumpToChapter(index)
-                    showChapters = false
+            Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                Column {
+                    TopAppBar(
+                        title = { Text("Chapters") },
+                        navigationIcon = {
+                            IconButton(onClick = { showChapters = false }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                            }
+                        }
+                    )
+                    ChapterList(
+                        chapters = chapters,
+                        currentIndex = chapterIndex,
+                        bookDurationMs = playbackState.durationMs,
+                        onSelect = { index ->
+                            viewModel.jumpToChapter(index)
+                            showChapters = false
+                        }
+                    )
                 }
-            )
+            }
         }
     }
 
@@ -431,11 +455,6 @@ private fun ChapterList(
     onSelect: (Int) -> Unit
 ) {
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = currentIndex.coerceAtLeast(0))
-    Text(
-        "Chapters",
-        style = MaterialTheme.typography.titleMedium,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-    )
     LazyColumn(state = listState) {
         itemsIndexed(chapters) { index, chapter ->
             val isCurrent = index == currentIndex

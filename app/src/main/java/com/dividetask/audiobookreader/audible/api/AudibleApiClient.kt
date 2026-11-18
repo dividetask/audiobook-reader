@@ -47,7 +47,8 @@ class AudibleApiClient @Inject constructor(
     private val authManager: AudibleAuthManager,
     private val signer: AudibleRequestSigner,
     private val debugLog: AppDebugLog,
-    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog
+    private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog,
+    private val backoff: LicenseBackoff
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -79,20 +80,19 @@ class AudibleApiClient @Inject constructor(
     }
 
     /**
-     * Set when Audible answers a license request with CustomerThrottled. License
-     * requests are skipped until then, since each retry can extend the throttle.
+     * After Audible answers a license request with CustomerThrottled, automatic license
+     * requests are held off until then (see [LicenseBackoff]: 1, 2, 4 … 32 days).
      */
-    @Volatile
-    var throttledUntil: Long = 0
-        private set
+    val throttledUntil: Long
+        get() = backoff.until
 
     val isThrottled: Boolean
         get() = System.currentTimeMillis() < throttledUntil
 
     fun throttleMessage(): String {
-        val until = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
+        val until = java.text.SimpleDateFormat("EEE MMM d, h:mm a", java.util.Locale.getDefault())
             .format(java.util.Date(throttledUntil))
-        return "Audible is limiting download requests for your account. Try again after $until."
+        return "Audible is limiting download requests for your account. Next automatic try $until."
     }
 
     suspend fun getLibrary(): ApiResult<List<AudibleBook>> {
@@ -178,7 +178,12 @@ class AudibleApiClient @Inject constructor(
         }
     }
 
-    suspend fun getDownloadUrl(asin: String): ApiResult<DownloadInfo> {
+    /**
+     * Asks Audible for a download license. While backing off, automatic requests are
+     * skipped; [force] (a request you made yourself) asks anyway, and its result
+     * counts towards the backoff like any other.
+     */
+    suspend fun getDownloadUrl(asin: String, force: Boolean = false): ApiResult<DownloadInfo> {
         debugLog.section("Download License ($asin)")
         val log = mutableListOf<String>()
         val locale = AudibleEndpoints.getLocale(tokenStore.locale)
@@ -189,7 +194,7 @@ class AudibleApiClient @Inject constructor(
             return ApiResult(null, log)
         }
 
-        if (isThrottled) {
+        if (isThrottled && !force) {
             log.add("Skipped license request — throttled by Audible")
             return ApiResult(null, log, throttleMessage())
         }
@@ -234,6 +239,9 @@ class AudibleApiClient @Inject constructor(
                         log.add("Retry response: ${retryText.take(500)}")
                         val retryInfo = extractDownloadInfo(retryText)
                         log.add("Download URL: ${retryInfo?.url?.take(100) ?: "NOT FOUND"}")
+                        if (retryInfo != null && backoff.granted()) {
+                            requestLog.event("backoff-cleared", "license granted after ${backoff.intervalDays}-day wait; back to normal schedule")
+                        }
                         return ApiResult(retryInfo, log, if (retryInfo == null) licenseError(retryText, log) else null)
                     }
                 }
@@ -243,6 +251,10 @@ class AudibleApiClient @Inject constructor(
             val info = extractDownloadInfo(responseText)
             log.add("Download URL: ${info?.url?.take(100) ?: "NOT FOUND"}")
             if (info?.key != null) log.add("Decryption key: present")
+            if (info != null && backoff.granted()) {
+                requestLog.event("backoff-cleared", "license granted after ${backoff.intervalDays}-day wait; back to normal schedule")
+                debugLog.log("API", "Download limit lifted — back to normal schedule")
+            }
             ApiResult(info, log, if (info == null) licenseError(responseText, log) else null)
         } catch (e: Exception) {
             log.add("EXCEPTION: ${e::class.simpleName}: ${e.message}")
@@ -255,7 +267,11 @@ class AudibleApiClient @Inject constructor(
      * Fetches the chapter list for [asin]. Returns null data on failure (network/auth),
      * or an empty list when Audible has no chapters for the title.
      */
-    suspend fun getChapters(asin: String): ApiResult<List<AudibleChapter>> {
+    suspend fun getChapters(asin: String): ApiResult<List<AudibleChapter>> =
+        getChapterInfo(asin).let { ApiResult(it.data?.let { info -> flattenChapters(info.chapters) }, it.debugLog, it.error) }
+
+    /** The chapter list for [asin] as Audible sends it, with its brand intro and outro lengths. */
+    suspend fun getChapterInfo(asin: String): ApiResult<AudibleChapterInfo> {
         val log = mutableListOf<String>()
         val locale = AudibleEndpoints.getLocale(tokenStore.locale)
         val url = AudibleEndpoints.contentMetadataUrl(locale, asin)
@@ -291,9 +307,9 @@ class AudibleApiClient @Inject constructor(
                 log.add("Response: ${responseText.take(300)}")
                 return ApiResult(null, log)
             }
-            val chapters = json.decodeFromString<AudibleChapterResponse>(responseText)
-                .contentMetadata?.chapterInfo?.chapters.orEmpty()
-            ApiResult(flattenChapters(chapters), log)
+            val info = json.decodeFromString<AudibleChapterResponse>(responseText)
+                .contentMetadata?.chapterInfo ?: AudibleChapterInfo()
+            ApiResult(info, log)
         } catch (e: Exception) {
             log.add("EXCEPTION: ${e::class.simpleName}: ${e.message}")
             Log.e("AudibleApi", "Chapter fetch failed for $asin", e)
@@ -337,7 +353,7 @@ class AudibleApiClient @Inject constructor(
         }
     }
 
-    private fun flattenChapters(chapters: List<AudibleChapter>): List<AudibleChapter> =
+    fun flattenChapters(chapters: List<AudibleChapter>): List<AudibleChapter> =
         chapters.flatMap { listOf(it.copy(chapters = null)) + flattenChapters(it.chapters.orEmpty()) }
 
     private fun decryptVoucher(asin: String, encryptedVoucher: String): String? {
@@ -390,9 +406,9 @@ class AudibleApiClient @Inject constructor(
         })
         return when {
             "CustomerThrottled" in codes -> {
-                requestLog.event("throttled", "skipping license requests for ${THROTTLE_COOLDOWN_MS / 60_000} min")
-                throttledUntil = System.currentTimeMillis() + THROTTLE_COOLDOWN_MS
-                debugLog.log("API", "Throttled — skipping license requests for ${THROTTLE_COOLDOWN_MS / 60_000} min")
+                val days = backoff.refused()
+                requestLog.event("throttled", "no automatic license requests for $days day(s)")
+                debugLog.log("API", "Throttled — no automatic license requests for $days day(s)")
                 throttleMessage()
             }
             codes.isNotEmpty() -> "Audible refused the download: ${codes.joinToString()}"
@@ -446,7 +462,4 @@ class AudibleApiClient @Inject constructor(
         }
     }
 
-    companion object {
-        private const val THROTTLE_COOLDOWN_MS = 15 * 60_000L
-    }
 }

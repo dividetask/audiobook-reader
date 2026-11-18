@@ -107,6 +107,14 @@ considering it in every change that touches Audible. See
 - When I share an Audible request log, analyse it against the hypotheses in that
   doc and add what we learn to its Findings table.
 
+## Background work must be visible
+
+- Anything the app does in the background (Audible downloads, conversions,
+  imports, server backups, server downloads, lookups) must say what it's doing
+  in the status cards at the top of the Library tab — the same place Audible
+  downloads appear — with progress when it's known. New background work adds
+  its own line there.
+
 ## Merging branches
 
 - Only take APKs from `main`. When merging any other branch, ignore all of

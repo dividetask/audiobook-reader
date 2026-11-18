@@ -58,7 +58,7 @@ class ServerLibraryViewModel @Inject constructor(
 ) : ViewModel()
 
 /**
- * The "Server" tab: audio files in the SFTP folder, each downloadable into the library.
+ * The "Server" tab: audio files in the sync folder (SFTP or S3), each downloadable into the library.
  * Files are grouped by series; series titles not on the server can be downloaded from
  * Audible when owned.
  */

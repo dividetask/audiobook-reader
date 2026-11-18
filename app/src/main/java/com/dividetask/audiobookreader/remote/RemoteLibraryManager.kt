@@ -33,12 +33,14 @@ data class RemoteDownload(val fraction: Float?)
 @Singleton
 class RemoteLibraryManager @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val sftp: SftpClient,
+    private val storage: RemoteStorage,
     private val settings: ServerSettings,
     private val tokenStore: AudibleTokenStore,
     private val bookRepository: BookRepository,
     private val metadataExtractor: MetadataExtractor,
-    private val debugLog: AppDebugLog
+    private val debugLog: AppDebugLog,
+    // Lazy: the importer depends on this class through the series repository
+    private val aaxImporter: dagger.Lazy<com.dividetask.audiobookreader.audible.download.AaxImporter>
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val downloadMutex = Mutex()
@@ -72,7 +74,7 @@ class RemoteLibraryManager @Inject constructor(
             _isLoading.value = true
             _error.value = null
             try {
-                _files.value = sftp.use { it.listAudio() }
+                _files.value = storage.use { it.listAudio() }
                 debugLog.log("SFTP", "Server has ${_files.value.size} audio files")
             } catch (e: Exception) {
                 debugLog.log("SFTP", "List failed: ${e.message}")
@@ -85,8 +87,8 @@ class RemoteLibraryManager @Inject constructor(
 
     fun download(file: RemoteFile) {
         if (file.relPath in _downloads.value) return
-        if (tokenStore.wifiOnlyDownloads && !onWifi()) {
-            _error.value = "WiFi only is on — connect to WiFi to download"
+        if (settings.syncWifiOnly && !onWifi()) {
+            _error.value = "Sync only over WiFi is on — connect to WiFi to download"
             return
         }
         _downloads.value = _downloads.value + (file.relPath to RemoteDownload(null))
@@ -122,7 +124,7 @@ class RemoteLibraryManager @Inject constructor(
         if (!isOnDevice(file)) {
             val job = kotlinx.coroutines.currentCoroutineContext()[Job]
             var lastUpdate = 0L
-            sftp.use { conn ->
+            storage.use { conn ->
                 conn.download(file.relPath, part, file.size) { done, total ->
                     val now = System.currentTimeMillis()
                     if (now - lastUpdate > 500) {
@@ -155,8 +157,10 @@ class RemoteLibraryManager @Inject constructor(
                 coverUri = null, fileUri = uri.toString(), durationMs = 0
             )
         }
-        bookRepository.insertBook(entity, metadata?.let { metadataExtractor.toChapterEntities(0, it) } ?: emptyList())
+        val id = bookRepository.insertBook(entity, metadata?.let { metadataExtractor.toChapterEntities(0, it) } ?: emptyList())
         debugLog.log("SFTP", "Added to library: ${entity.title}")
+        // Only one copy of a book
+        aaxImporter.get().removeOtherCopies(id)
     }
 
     private fun onWifi(): Boolean {

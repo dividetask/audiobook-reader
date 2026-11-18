@@ -21,6 +21,9 @@ interface SeriesDao {
     @Query("SELECT * FROM series_books")
     fun getAllBooks(): Flow<List<SeriesBookEntity>>
 
+    @Query("SELECT * FROM series_books")
+    suspend fun getAllBooksOnce(): List<SeriesBookEntity>
+
     @Query("SELECT * FROM series_lookups")
     fun getAllLookups(): Flow<List<SeriesLookupEntity>>
 

@@ -50,4 +50,5 @@ class BookRepositoryImpl @Inject constructor(
     }
 
     override suspend fun setChaptersChecked(bookId: Long) = bookDao.setChaptersChecked(bookId)
+    override suspend fun setAsin(bookId: Long, asin: String) = bookDao.setAsin(bookId, asin)
 }
