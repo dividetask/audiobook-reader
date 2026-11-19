@@ -150,7 +150,10 @@ class S3Connection internal constructor(
         }
 
         // Continue an earlier multipart upload of this key if the bucket still has it
-        var uploadId = settings.s3UploadId(key)
+        var uploadId = settings.s3UploadId(key) ?: unfinishedUpload(key)?.also {
+            log("Continuing unfinished upload of $key found on the server")
+            settings.setS3UploadId(key, it)
+        }
         val done = sortedMapOf<Int, String>()
         if (uploadId != null) {
             try {
@@ -187,7 +190,7 @@ class S3Connection internal constructor(
             done.forEach { (n, etag) -> append("<Part><PartNumber>$n</PartNumber><ETag>$etag</ETag></Part>") }
             append("</CompleteMultipartUpload>")
         }
-        val result = request("POST", key, sortedMapOf("uploadId" to id), body.toByteArray()).text()
+        val result = request("POST", key, sortedMapOf("uploadId" to id), body.toByteArray(), contentType = "application/xml").text()
         // Completion can fail with 200 and an <Error> body
         if (result.contains("<Error>")) {
             throw ServerException(errorMessage(200, result), settingsProblem = tag(result, "Code") in SETTINGS_ERRORS)
@@ -213,6 +216,19 @@ class S3Connection internal constructor(
                 }
             }
         }
+    }
+
+    /** The newest unfinished multipart upload of exactly [key] on the server, if any. */
+    private fun unfinishedUpload(key: String): String? = try {
+        val xml = request("GET", null, sortedMapOf("uploads" to "", "prefix" to key)).text()
+        Regex("<Upload>(.*?)</Upload>", RegexOption.DOT_MATCHES_ALL).findAll(xml)
+            .map { it.groupValues[1] }
+            .filter { tag(it, "Key") == key }
+            .maxByOrNull { tag(it, "Initiated") ?: "" }
+            ?.let { tag(it, "UploadId") }
+    } catch (e: ServerException) {
+        log("Could not check for unfinished uploads: ${e.message}")
+        null
     }
 
     private fun listParts(key: String, uploadId: String): Map<Int, String> {
@@ -241,6 +257,7 @@ class S3Connection internal constructor(
         query: java.util.SortedMap<String, String>,
         payload: ByteArray? = null,
         extraHeaders: Map<String, String> = emptyMap(),
+        contentType: String? = null,
         sink: ((InputStream, Int) -> Unit)? = null
     ): Response {
         val path = "/" + uriEncode(bucket, true) + (key?.let { "/" + uriEncode(it, false) } ?: "")
@@ -280,6 +297,11 @@ class S3Connection internal constructor(
             extraHeaders.forEach { (k, v) -> conn.setRequestProperty(k, v) }
             if (payload != null || method == "PUT" || method == "POST") {
                 val bytes = payload ?: ByteArray(0)
+                // Without this Android sends POSTs as form data, and Backblaze then reads the XML
+                // body as query parameters — the signature no longer matches
+                if (extraHeaders.keys.none { it.equals("Content-Type", ignoreCase = true) }) {
+                    conn.setRequestProperty("Content-Type", contentType ?: "application/octet-stream")
+                }
                 conn.doOutput = true
                 conn.setFixedLengthStreamingMode(bytes.size)
                 conn.outputStream.use { it.write(bytes) }
