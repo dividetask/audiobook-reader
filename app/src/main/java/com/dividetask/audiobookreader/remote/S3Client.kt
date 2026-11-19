@@ -124,6 +124,7 @@ class S3Connection internal constructor(
         } while (token != null)
         log("List \"$bucket\" folder \"${listPrefix.ifEmpty { "(top)" }}\": $objects objects, ${out.size} audio" +
             if (skipped.isNotEmpty()) "; not audio e.g. ${skipped.joinToString(", ")}" else "")
+        if (out.isNotEmpty()) log("On server: ${out.joinToString(", ") { it.relPath }}")
         if (objects == 0 && listPrefix.isNotEmpty()) logBucketSample()
         return out.sortedBy { it.relPath.lowercase() }
     }

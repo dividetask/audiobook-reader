@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -186,9 +187,28 @@ fun ServerLibraryTab(
                     val owned = member.asin?.let { seriesIndex.libraryByAsin[it] }
                     when {
                         owned == null -> SeriesPlaceholderItem(member, "Not purchased")
-                        isAudibleDownloaded(owned.asin) -> SeriesPlaceholderItem(member, "Not on server · on device") {
-                            Icon(Icons.Default.CheckCircle, contentDescription = "On device",
-                                modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.primary)
+                        // On the phone, not on the server: show where its upload stands (the check means "on server")
+                        isAudibleDownloaded(owned.asin) -> {
+                            val title = member.title
+                            val uploading = backup.phase == BackupPhase.UPLOADING && backup.title.equals(title, ignoreCase = true)
+                            val queued = queue.any { it.first.equals(title, ignoreCase = true) }
+                            when {
+                                uploading -> {
+                                    val f = if (backup.total > 0) backup.bytes.toFloat() / backup.total else 0f
+                                    SeriesPlaceholderItem(member, "Uploading to server — ${(f * 100).toInt()}%") {
+                                        Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                                            CircularProgressIndicator(progress = { f }, modifier = Modifier.size(36.dp), strokeWidth = 3.dp)
+                                        }
+                                    }
+                                }
+                                queued -> SeriesPlaceholderItem(member, "Waiting to upload · on device") {
+                                    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                                        Icon(Icons.Default.Refresh, contentDescription = "Waiting to upload",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
+                                    }
+                                }
+                                else -> SeriesPlaceholderItem(member, "Not on server · on device")
+                            }
                         }
                         else -> SeriesPlaceholderItem(member, "Not on server · owned on Audible") {
                             IconButton(onClick = { onAudibleDownload(owned) }) {
