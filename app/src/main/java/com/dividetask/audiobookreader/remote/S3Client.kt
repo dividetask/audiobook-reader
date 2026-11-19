@@ -218,6 +218,45 @@ class S3Connection internal constructor(
         }
     }
 
+    override fun unfinishedUploads(): List<UnfinishedUpload> {
+        val listPrefix = if (prefix.isEmpty()) "" else "$prefix/"
+        val out = mutableListOf<UnfinishedUpload>()
+        var keyMarker: String? = null
+        var idMarker: String? = null
+        do {
+            val query = sortedMapOf("uploads" to "", "prefix" to listPrefix)
+            keyMarker?.let { query["key-marker"] = it }
+            idMarker?.let { query["upload-id-marker"] = it }
+            val xml = request("GET", null, query).text()
+            for (m in Regex("<Upload>(.*?)</Upload>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
+                val item = m.groupValues[1]
+                val key = tag(item, "Key") ?: continue
+                val id = tag(item, "UploadId") ?: continue
+                out.add(UnfinishedUpload(key.removePrefix(listPrefix), id, tag(item, "Initiated") ?: "",
+                    partsSize(key, id), settings.s3UploadId(key) == id))
+            }
+            val truncated = tag(xml, "IsTruncated") == "true"
+            keyMarker = if (truncated) tag(xml, "NextKeyMarker") else null
+            idMarker = if (truncated) tag(xml, "NextUploadIdMarker") else null
+        } while (keyMarker != null)
+        return out
+    }
+
+    override fun abortUpload(upload: UnfinishedUpload) {
+        val key = keyFor(upload.relPath)
+        request("DELETE", key, sortedMapOf("uploadId" to upload.uploadId))
+        if (settings.s3UploadId(key) == upload.uploadId) settings.setS3UploadId(key, null)
+    }
+
+    /** Bytes uploaded so far; 0 if the parts can't be listed. */
+    private fun partsSize(key: String, uploadId: String): Long = try {
+        val xml = request("GET", key, sortedMapOf("uploadId" to uploadId)).text()
+        Regex("<Part>(.*?)</Part>", RegexOption.DOT_MATCHES_ALL).findAll(xml)
+            .sumOf { tag(it.groupValues[1], "Size")?.toLongOrNull() ?: 0L }
+    } catch (e: ServerException) {
+        0L
+    }
+
     /** The newest unfinished multipart upload of exactly [key] on the server, if any. */
     private fun unfinishedUpload(key: String): String? = try {
         val xml = request("GET", null, sortedMapOf("uploads" to "", "prefix" to key)).text()

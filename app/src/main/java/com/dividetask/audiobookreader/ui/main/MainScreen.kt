@@ -123,6 +123,7 @@ fun MainScreen(
     val queuedAsins by viewModel.queuedAsins.collectAsState()
     val pendingDownloads by viewModel.pendingDownloads.collectAsState()
     val websiteOffer by viewModel.websiteOffer.collectAsState()
+    val abandonedUploads by viewModel.abandonedUploads.collectAsState()
     val convertingBookId by viewModel.convertingBookId.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var bookToDelete by remember { mutableStateOf<BookEntity?>(null) }
@@ -399,6 +400,30 @@ fun MainScreen(
             text = { Text(warning.message) },
             confirmButton = { TextButton(onClick = { viewModel.confirmStorageWarning() }) { Text("Add anyway") } },
             dismissButton = { TextButton(onClick = { viewModel.dismissStorageWarning() }) { Text("Cancel") } }
+        )
+    }
+
+    // Unfinished uploads on the server this phone won't continue: they still take up space
+    if (abandonedUploads.isNotEmpty() && websiteOffer == null) {
+        val mb = abandonedUploads.sumOf { it.size } / 1_048_576
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text("Unfinished server uploads") },
+            text = {
+                Text(
+                    "${abandonedUploads.size} upload(s) on the server were started but can't be continued " +
+                        "(${mb}MB). Books still on the phone are uploaded again from the start.\n\n" +
+                        abandonedUploads.take(5).joinToString("\n") { "• ${it.relPath}" } +
+                        (if (abandonedUploads.size > 5) "\n• …and ${abandonedUploads.size - 5} more" else "") +
+                        "\n\nCancel them on the server to free the space?"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.cancelAbandonedUploads() }) { Text("Cancel uploads") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.keepAbandonedUploads() }) { Text("Keep") }
+            }
         )
     }
 

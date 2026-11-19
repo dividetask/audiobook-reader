@@ -52,7 +52,7 @@ class MainViewModel @Inject constructor(
     private val sortPreferences: ListSortPreferences,
     val playbackController: com.dividetask.audiobookreader.player.PlaybackController,
     private val debugLog: AppDebugLog,
-    backupEngine: com.dividetask.audiobookreader.remote.BackupEngine,
+    private val backupEngine: com.dividetask.audiobookreader.remote.BackupEngine,
     remoteLibrary: com.dividetask.audiobookreader.remote.RemoteLibraryManager,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
@@ -66,6 +66,7 @@ class MainViewModel @Inject constructor(
                     BackupPhase.DOWNLOADING -> "Server backup — downloading from Audible"
                     BackupPhase.CONVERTING -> "Server backup — converting"
                     BackupPhase.UPLOADING -> "Server backup — uploading"
+                    BackupPhase.CANCELLING -> "Server backup — cancelling unfinished upload"
                     BackupPhase.IDLE -> ""
                 }
                 val left = if (b.remaining > 1) " · ${b.remaining - 1} more to back up" else ""
@@ -77,6 +78,15 @@ class MainViewModel @Inject constructor(
                     if (d.fraction == null) "Queued download from server" else "Downloading from server", d.fraction)
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Unfinished server uploads that can't be continued, waiting for the user to cancel or keep them. */
+    val abandonedUploads = backupEngine.abandoned
+
+    fun cancelAbandonedUploads() {
+        viewModelScope.launch { backupEngine.cancelAbandoned() }
+    }
+
+    fun keepAbandonedUploads() = backupEngine.keepAbandoned()
 
     val localBooks: StateFlow<List<BookEntity>> = bookRepository.getAllBooks()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

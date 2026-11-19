@@ -393,6 +393,7 @@ fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) 
                     BackupPhase.DOWNLOADING -> "Downloading"
                     BackupPhase.CONVERTING -> "Converting"
                     BackupPhase.UPLOADING -> "Uploading"
+                    BackupPhase.CANCELLING -> "Cancelling unfinished upload"
                     else -> ""
                 }
                 Text(if (action.isEmpty()) status.title else "$action: ${status.title}",

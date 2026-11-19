@@ -43,7 +43,7 @@ import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class BackupPhase { IDLE, CHECKING, DOWNLOADING, CONVERTING, UPLOADING }
+enum class BackupPhase { IDLE, CHECKING, DOWNLOADING, CONVERTING, UPLOADING, CANCELLING }
 
 data class BackupStatus(
     val phase: BackupPhase = BackupPhase.IDLE,
@@ -86,6 +86,10 @@ class BackupEngine @Inject constructor(
     private val mutex = Mutex()
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
+    /** Unfinished uploads on the server this phone won't continue, waiting for the user to decide. */
+    private val _abandoned = MutableStateFlow<List<UnfinishedUpload>>(emptyList())
+    val abandoned: StateFlow<List<UnfinishedUpload>> = _abandoned.asStateFlow()
+
     private val _status = MutableStateFlow(BackupStatus())
     val status: StateFlow<BackupStatus> = _status.asStateFlow()
 
@@ -110,6 +114,70 @@ class BackupEngine @Inject constructor(
      * or server. [force] ("Back up now") asks Audible even while backing off after a refusal.
      */
     suspend fun runAudible(maxBooks: Int, force: Boolean = false): BackupOutcome = locked { runAudibleLocked(maxBooks, force) }
+
+    /** Cancels the unfinished uploads the user chose to remove. */
+    suspend fun cancelAbandoned() {
+        val list = _abandoned.value
+        _abandoned.value = emptyList()
+        if (list.isEmpty()) return
+        locked {
+            debugLog.section("Server Backup (cancel unfinished uploads)")
+            var cancelled = 0
+            try {
+                storage.use { conn ->
+                    for ((i, u) in list.withIndex()) {
+                        setStatus(BackupStatus(BackupPhase.CANCELLING, u.relPath, i.toLong(), list.size.toLong(), list.size - i))
+                        conn.abortUpload(u)
+                        cancelled++
+                        debugLog.log("BACKUP", "Cancelled unfinished upload: ${u.relPath}")
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                debugLog.log("BACKUP", "Cancelling unfinished uploads failed: ${e.message}")
+            }
+            debugLog.log("BACKUP", "Cancelled $cancelled of ${list.size} unfinished uploads")
+            BackupOutcome.AllDone
+        }
+    }
+
+    /** Keeps these unfinished uploads on the server and doesn't ask about them again. */
+    fun keepAbandoned() {
+        val list = _abandoned.value
+        _abandoned.value = emptyList()
+        settings.keptUploads = settings.keptUploads + list.map { it.uploadId }
+        list.forEach { debugLog.log("BACKUP", "Keeping unfinished upload: ${it.relPath}") }
+    }
+
+    /**
+     * Finds unfinished uploads this phone won't continue: for a path a book of ours uses, every one
+     * except the one [S3Connection.upload] would pick up; for any other path, all of them. Each is
+     * logged; the ones not already kept are offered to the user to cancel.
+     */
+    private fun checkAbandoned(expectedBases: Set<String>) {
+        val all = try {
+            storage.use { it.unfinishedUploads() }
+        } catch (e: Exception) {
+            debugLog.log("BACKUP", "Could not list unfinished uploads: ${e.message}")
+            return
+        }
+        val abandoned = all.groupBy { it.relPath }.flatMap { (rel, uploads) ->
+            if (rel.substringBeforeLast('.').lowercase() !in expectedBases) return@flatMap uploads
+            val resumed = uploads.firstOrNull { it.current } ?: uploads.maxByOrNull { it.initiated }
+            uploads.filter { it !== resumed }
+        }
+        val resumable = all.size - abandoned.size
+        if (resumable > 0) debugLog.log("BACKUP", "$resumable unfinished upload(s) will be continued")
+        val kept = settings.keptUploads
+        for (u in abandoned) {
+            val note = if (u.uploadId in kept) " (kept)" else ""
+            debugLog.log("BACKUP", "Unfinished upload can't be continued$note: ${u.relPath}, " +
+                "${u.size / 1_048_576}MB, started ${u.initiated}")
+        }
+        // Forget kept IDs that are gone from the server
+        settings.keptUploads = kept.intersect(all.map { it.uploadId }.toSet())
+        _abandoned.value = abandoned.filter { it.uploadId !in kept }
+    }
 
     private suspend fun locked(block: suspend () -> BackupOutcome): BackupOutcome = mutex.withLock {
         withContext(Dispatchers.IO) {
@@ -201,6 +269,8 @@ class BackupEngine @Inject constructor(
                 }
             }
         }
+        checkAbandoned(localCopies(audibleByAsin).map { it.remoteBase.lowercase() }.toSet() +
+            audibleByAsin.values.map { remoteBase(it).lowercase() })
         if (done == 0 && failed == 0) return finish(BackupOutcome.AllDone, "all on server", prefix = "Phone copies")
         return finish(BackupOutcome.AllDone,
             "uploaded $done" + (if (failed > 0) ", $failed failed" else ""), prefix = "Phone copies")
@@ -431,6 +501,7 @@ class BackupEngine @Inject constructor(
                 BackupPhase.DOWNLOADING -> "Backup: downloading"
                 BackupPhase.CONVERTING -> "Backup: converting"
                 BackupPhase.UPLOADING -> "Backup: uploading"
+                BackupPhase.CANCELLING -> "Backup: cancelling unfinished uploads"
                 else -> "Server backup"
             })
             .setContentText(status.title)

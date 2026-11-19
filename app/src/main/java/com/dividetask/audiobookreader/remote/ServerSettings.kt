@@ -136,6 +136,11 @@ class ServerSettings @Inject constructor(
     private fun s3Uploads(): Map<String, String> = str("s3_uploads", "").split("\n")
         .filter { it.contains('\t') }.associate { it.substringBefore('\t') to it.substringAfter('\t') }
 
+    /** Upload IDs of unfinished uploads the user chose to keep, so they aren't offered again. */
+    var keptUploads: Set<String>
+        get() = str("kept_uploads", "").split("\n").filter { it.isNotBlank() }.toSet()
+        set(value) = putStr("kept_uploads", value.joinToString("\n"))
+
     /** Upload/download only on WiFi (or other unmetered networks). */
     var syncWifiOnly: Boolean
         get() = try { prefs.getBoolean("sync_wifi_only", true) } catch (_: Exception) { true }
