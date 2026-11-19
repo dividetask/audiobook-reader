@@ -41,7 +41,8 @@ All code optimizations and obfuscation are disabled for debuggable builds.
 > Task :app:kspDebugKotlin
 
 > Task :app:compileDebugKotlin
-w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/common/SeriesList.kt:175:40 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
+w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/common/SeriesList.kt:199:40 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
+w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/main/MainScreen.kt:151:29 Condition is always 'false'.
 
 > Task :app:compileDebugJavaWithJavac
 > Task :app:hiltAggregateDepsDebug UP-TO-DATE
@@ -57,5 +58,5 @@ w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 49s
+BUILD SUCCESSFUL in 52s
 41 actionable tasks: 17 executed, 24 up-to-date
