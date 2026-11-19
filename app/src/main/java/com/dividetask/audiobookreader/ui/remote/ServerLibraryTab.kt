@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -52,6 +53,10 @@ import com.dividetask.audiobookreader.remote.RemoteFile
 import com.dividetask.audiobookreader.remote.RemoteLibraryManager
 import androidx.lifecycle.viewModelScope
 import com.dividetask.audiobookreader.remote.BackupEngine
+import com.dividetask.audiobookreader.remote.BackupScheduler
+import com.dividetask.audiobookreader.ui.common.SeriesMember
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import com.dividetask.audiobookreader.remote.BackupPhase
 import com.dividetask.audiobookreader.remote.BackupStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -62,8 +67,15 @@ import javax.inject.Inject
 @HiltViewModel
 class ServerLibraryViewModel @Inject constructor(
     val manager: RemoteLibraryManager,
-    backupEngine: BackupEngine
+    backupEngine: BackupEngine,
+    private val scheduler: BackupScheduler
 ) : ViewModel() {
+    /** Audible books the user asked to back up that haven't finished. */
+    val requestedBooks: StateFlow<Set<String>> =
+        scheduler.requestedBooks.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
+    fun backUp(asin: String) = scheduler.backupBook(asin)
+
     val backupStatus: StateFlow<BackupStatus> = backupEngine.status
     val uploadQueue: StateFlow<List<Pair<String, String>>> = backupEngine.queue
 
@@ -112,6 +124,7 @@ fun ServerLibraryTab(
     val backup by viewModel.backupStatus.collectAsState()
     val queue by viewModel.uploadQueue.collectAsState()
     val unfinished by manager.unfinished.collectAsState()
+    val requested by viewModel.requestedBooks.collectAsState()
     val uploads = remember(backup, queue, unfinished, searchQuery) {
         uploadRows(backup, queue, unfinished).filter { matchesSearch(searchQuery, it.title, it.folder, null) }
     }
@@ -157,6 +170,38 @@ fun ServerLibraryTab(
                 }
             }
         }
+        // A series title not on the server; [target] is the book whose state is shown (itself or its bundle)
+        val MissingFromServer: @Composable (SeriesMember<RemoteFile>, SeriesMember<RemoteFile>, String) -> Unit = { member, target, prefix ->
+            val owned = target.asin?.let { seriesIndex.libraryByAsin[it] }
+            val title = target.title
+            val busy = backup.title.equals(title, ignoreCase = true) &&
+                backup.phase in listOf(BackupPhase.DOWNLOADING, BackupPhase.CONVERTING, BackupPhase.UPLOADING)
+            val progress = if (busy && backup.total > 0) backup.bytes.toFloat() / backup.total else null
+            val percent = progress?.let { " — ${(it * 100).toInt()}%" } ?: ""
+            when {
+                owned == null -> SeriesPlaceholderItem(member, "Not purchased")
+                busy -> SeriesPlaceholderItem(member, prefix + when (backup.phase) {
+                    BackupPhase.DOWNLOADING -> "Downloading from Audible for the server$percent"
+                    BackupPhase.CONVERTING -> "Converting for the server"
+                    else -> "Uploading to server$percent"
+                }) { ProgressIcon(progress) }
+                // On the phone, not on the server: the phone-copies backup uploads it
+                isAudibleDownloaded(owned.asin) ->
+                    if (queue.any { it.first.equals(title, ignoreCase = true) }) {
+                        SeriesPlaceholderItem(member, prefix + "Waiting to upload · on device") { WaitingIcon("Waiting to upload") }
+                    } else {
+                        SeriesPlaceholderItem(member, prefix + "Not on server · on device")
+                    }
+                owned.asin in requested -> SeriesPlaceholderItem(member, prefix + "Waiting to back up from Audible") {
+                    WaitingIcon("Waiting to back up")
+                }
+                else -> SeriesPlaceholderItem(member, prefix + "Not on server · owned on Audible") {
+                    IconButton(onClick = { viewModel.backUp(owned.asin) }) {
+                        Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Back up to server", modifier = Modifier.size(32.dp))
+                    }
+                }
+            }
+        }
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(16.dp)
@@ -184,37 +229,15 @@ fun ServerLibraryTab(
                     )
                 },
                 missing = { member ->
-                    val owned = member.asin?.let { seriesIndex.libraryByAsin[it] }
+                    val bundle = member.coveredBy
                     when {
-                        owned == null -> SeriesPlaceholderItem(member, "Not purchased")
-                        // On the phone, not on the server: show where its upload stands (the check means "on server")
-                        isAudibleDownloaded(owned.asin) -> {
-                            val title = member.title
-                            val uploading = backup.phase == BackupPhase.UPLOADING && backup.title.equals(title, ignoreCase = true)
-                            val queued = queue.any { it.first.equals(title, ignoreCase = true) }
-                            when {
-                                uploading -> {
-                                    val f = if (backup.total > 0) backup.bytes.toFloat() / backup.total else 0f
-                                    SeriesPlaceholderItem(member, "Uploading to server — ${(f * 100).toInt()}%") {
-                                        Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
-                                            CircularProgressIndicator(progress = { f }, modifier = Modifier.size(36.dp), strokeWidth = 3.dp)
-                                        }
-                                    }
-                                }
-                                queued -> SeriesPlaceholderItem(member, "Waiting to upload · on device") {
-                                    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
-                                        Icon(Icons.Default.Refresh, contentDescription = "Waiting to upload",
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
-                                    }
-                                }
-                                else -> SeriesPlaceholderItem(member, "Not on server · on device")
-                            }
+                        // Inside an owned bundle (e.g. book 2 of "Books 1-3"): the bundle's state
+                        bundle?.item != null -> SeriesPlaceholderItem(member, "In ${bundle.title} · on server") {
+                            Icon(Icons.Default.CheckCircle, contentDescription = "On server",
+                                modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.primary)
                         }
-                        else -> SeriesPlaceholderItem(member, "Not on server · owned on Audible") {
-                            IconButton(onClick = { onAudibleDownload(owned) }) {
-                                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Download from Audible")
-                            }
-                        }
+                        bundle != null -> MissingFromServer(member, bundle, "In ${bundle.title} · ")
+                        else -> MissingFromServer(member, member, "")
                     }
                 }
             )
@@ -263,6 +286,22 @@ private fun uploadRows(
             "Upload not finished · ${mb(size)} MB on server", null))
     }
     return rows
+}
+
+@Composable
+private fun ProgressIcon(fraction: Float?) {
+    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+        if (fraction == null) CircularProgressIndicator(modifier = Modifier.size(36.dp), strokeWidth = 3.dp)
+        else CircularProgressIndicator(progress = { fraction }, modifier = Modifier.size(36.dp), strokeWidth = 3.dp)
+    }
+}
+
+@Composable
+private fun WaitingIcon(description: String) {
+    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+        Icon(Icons.Default.Refresh, contentDescription = description,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
+    }
 }
 
 private fun folderOf(path: String) = path.substringBeforeLast('/', "").substringAfterLast('/')

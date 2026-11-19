@@ -119,7 +119,8 @@ class BackupEngine @Inject constructor(
      * Downloads, converts and uploads up to [maxBooks] Audible books that aren't on the phone
      * or server. [force] ("Back up now") asks Audible even while backing off after a refusal.
      */
-    suspend fun runAudible(maxBooks: Int, force: Boolean = false): BackupOutcome = locked { runAudibleLocked(maxBooks, force) }
+    suspend fun runAudible(maxBooks: Int, force: Boolean = false, asin: String? = null): BackupOutcome =
+        locked { runAudibleLocked(maxBooks, force, asin) }
 
     /** Cancels the unfinished uploads the user chose to remove. */
     suspend fun cancelAbandoned() {
@@ -285,8 +286,9 @@ class BackupEngine @Inject constructor(
             "uploaded $done" + (if (failed > 0) ", $failed failed" else ""), prefix = "Phone copies")
     }
 
-    private suspend fun runAudibleLocked(maxBooks: Int, force: Boolean): BackupOutcome {
+    private suspend fun runAudibleLocked(maxBooks: Int, force: Boolean, onlyAsin: String? = null): BackupOutcome {
         debugLog.section("Server Backup (Audible)")
+        onlyAsin?.let { debugLog.log("BACKUP", "Requested from the Server tab: $it") }
         if (!settings.isConfigured) return finish(BackupOutcome.Failed("Server not set up", retry = false))
         if (!tokenStore.isAuthenticated) return finish(BackupOutcome.Failed("Not signed in to Audible", retry = false))
         if (!force && apiClient.isThrottled) {
@@ -320,7 +322,9 @@ class BackupEngine @Inject constructor(
 
         val failures = settings.failures
         val pending = library.filter {
-            it.asin !in onPhone && remoteBase(it).lowercase() !in onServer && (failures[it.asin] ?: 0) < MAX_FAILURES
+            it.asin !in onPhone && remoteBase(it).lowercase() !in onServer &&
+                // A book the user asked for is tried even after earlier failures
+                if (onlyAsin != null) it.asin == onlyAsin else (failures[it.asin] ?: 0) < MAX_FAILURES
         }
         debugLog.log("BACKUP", "${library.size} Audible books, ${onPhone.size} on phone, ${pending.size} to download and back up")
         if (pending.isEmpty()) return finish(BackupOutcome.AllDone, "nothing left to download", prefix = "Audible")

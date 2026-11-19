@@ -53,8 +53,31 @@ data class SeriesMember<out T>(
     val title: String,
     val sequence: String?,
     val coverUrl: String?,
-    val item: T?
+    val item: T?,
+    /** An owned bundle whose numbers include this one (e.g. "1-3" for book 2), when this one isn't owned itself. */
+    val coveredBy: SeriesMember<T>? = null
 )
+
+private val RANGE = Regex("""(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)""")
+
+/** "1-3" → 1.0..3.0; null for a single number. */
+private fun sequenceRange(sequence: String?): ClosedFloatingPointRange<Double>? {
+    val m = sequence?.let { RANGE.find(it) } ?: return null
+    val lo = m.groupValues[1].toDoubleOrNull() ?: return null
+    val hi = m.groupValues[2].toDoubleOrNull() ?: return null
+    return if (lo <= hi) lo..hi else null
+}
+
+/** Marks titles that aren't owned but are inside an owned bundle of the same series. */
+private fun <T> markCovered(members: List<SeriesMember<T>>, owned: (SeriesMember<T>) -> Boolean): List<SeriesMember<T>> {
+    val bundles = members.filter { owned(it) }.mapNotNull { m -> sequenceRange(m.sequence)?.let { m to it } }
+    if (bundles.isEmpty()) return members
+    return members.map { m ->
+        if (owned(m) || sequenceRange(m.sequence) != null) return@map m
+        val n = SeriesIndex.sequenceNumber(m.sequence) ?: return@map m
+        bundles.firstOrNull { n in it.second }?.let { m.copy(coveredBy = it.first) } ?: m
+    }
+}
 
 /**
  * Groups [items] by series, filling each series with the titles Audible lists that the
@@ -82,16 +105,17 @@ fun <T> groupBySeries(
             }
             // Books on the tab that the catalog's list doesn't include
             val extra = remaining.map { (item, ref) -> SeriesMember(ref.asin, titleOf(item), ref.sequence, coverOf(item), item) }
-            val members = dropRepeats(listed + extra, index).sortedWith(
+            val isOwned = { m: SeriesMember<T> -> m.item != null || m.asin?.let { it in index.libraryByAsin } == true }
+            val members = markCovered(dropRepeats(listed + extra, index).sortedWith(
                 compareBy<SeriesMember<T>, Double?>(nullsLast<Double>()) { SeriesIndex.sequenceNumber(it.sequence) }
                     .thenBy(String.CASE_INSENSITIVE_ORDER) { it.title }
-            )
+            ), isOwned)
             BookListEntry.Series(
                 seriesAsin = seriesAsin,
                 title = onTab.first().second.seriesTitle,
                 coverUrl = members.firstNotNullOfOrNull { it.coverUrl },
                 members = members,
-                ownedCount = members.count { m -> m.item != null || m.asin?.let { it in index.libraryByAsin } == true }
+                ownedCount = members.count { m -> isOwned(m) || m.coveredBy != null }
             )
         }
     val byName = compareBy<BookListEntry<T>, String>(String.CASE_INSENSITIVE_ORDER) {

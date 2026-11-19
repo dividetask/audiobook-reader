@@ -136,7 +136,29 @@ fun MainScreen(
     // A series title the tab doesn't have: owned on Audible gets the download button
     val missingSeriesBook: @Composable (SeriesMember<*>) -> Unit = { member ->
         val owned = member.asin?.let { seriesIndex.libraryByAsin[it] }
-        if (owned != null) {
+        val bundle = member.coveredBy
+        val bundleOwned = bundle?.asin?.let { seriesIndex.libraryByAsin[it] }
+        if (owned == null && bundle != null) {
+            // Inside an owned bundle (e.g. book 2 of "Books 1-3"): show the bundle's state
+            val onDevice = bundleOwned?.let { viewModel.isBookDownloaded(it.asin) } ?: true
+            val progress = bundleOwned?.let { audibleProgress(it, downloadProgress, queuedAsins) }
+            when {
+                progress != null -> SeriesPlaceholderItem(member, "In ${bundle.title} · downloading") {
+                    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(modifier = Modifier.size(36.dp), strokeWidth = 3.dp)
+                    }
+                }
+                onDevice || bundleOwned == null -> SeriesPlaceholderItem(member, "In ${bundle.title} · on device") {
+                    Icon(Icons.Default.CheckCircle, contentDescription = "On device",
+                        modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.primary)
+                }
+                else -> SeriesPlaceholderItem(member, "In ${bundle.title} · owned on Audible") {
+                    IconButton(onClick = { bundleOwned?.let { viewModel.downloadAudibleBook(it) } }) {
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Download", modifier = Modifier.size(32.dp))
+                    }
+                }
+            }
+        } else if (owned != null) {
             AudibleBookItem(
                 book = owned,
                 isDownloaded = viewModel.isBookDownloaded(owned.asin),

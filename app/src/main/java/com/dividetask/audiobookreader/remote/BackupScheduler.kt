@@ -123,6 +123,34 @@ class BackupScheduler @Inject constructor(
 
     fun cancelBackupNow() = workManager.cancelUniqueWork(NOW)
 
+    /** Backs up one Audible book (download → convert → upload → phone copy removed), as soon as there's a network. */
+    fun backupBook(asin: String) {
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(
+                if (settings.syncWifiOnly || tokenStore.wifiOnlyDownloads) NetworkType.UNMETERED else NetworkType.CONNECTED
+            )
+            .build()
+        val request = OneTimeWorkRequestBuilder<BackupWorker>()
+            .setConstraints(constraints)
+            .addTag(BOOK_TAG)
+            .addTag("$BOOK_TAG:$asin")
+            .setInputData(workDataOf(
+                BackupWorker.KEY_MODE to BackupWorker.MODE_AUDIBLE,
+                BackupWorker.KEY_FORCE to true,
+                BackupWorker.KEY_ASIN to asin
+            ))
+            .build()
+        workManager.enqueueUniqueWork("$BOOK_TAG:$asin", ExistingWorkPolicy.KEEP, request)
+    }
+
+    /** Audible books tapped for backup in the Server tab that haven't finished. */
+    val requestedBooks: Flow<Set<String>>
+        get() = workManager.getWorkInfosByTagFlow(BOOK_TAG).map { infos ->
+            infos.filter { !it.state.isFinished }
+                .flatMap { info -> info.tags.filter { it.startsWith("$BOOK_TAG:") }.map { it.removePrefix("$BOOK_TAG:") } }
+                .toSet()
+        }
+
     /** True while "Back up now" is queued or running. */
     val backupNowPending: Flow<Boolean>
         get() = workManager.getWorkInfosForUniqueWorkFlow(NOW).map { infos -> infos.any { !it.state.isFinished } }
@@ -136,6 +164,7 @@ class BackupScheduler @Inject constructor(
         get() = workManager.getWorkInfosForUniqueWorkFlow(LOCAL).map { infos -> infos.firstOrNull { !it.state.isFinished }?.state }
 
     companion object {
+        private const val BOOK_TAG = "server_backup_book"
         private const val AUDIBLE_PERIODIC = "server_backup_periodic"
         private const val AUDIBLE = "server_backup_audible"
         private const val LOCAL_PERIODIC = "server_backup_local_periodic"

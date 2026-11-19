@@ -31,7 +31,8 @@ class BackupWorker @AssistedInject constructor(
             Log.w("BackupWorker", "Could not run in foreground: ${e.message}")
         }
         val outcome = if (local) engine.runLocal()
-            else engine.runAudible(maxBooks = 1, force = inputData.getBoolean(KEY_FORCE, false))
+            else engine.runAudible(maxBooks = 1, force = inputData.getBoolean(KEY_FORCE, false),
+                asin = inputData.getString(KEY_ASIN))
         return when (outcome) {
             BackupOutcome.AllDone, BackupOutcome.MoreRemaining -> Result.success()
             is BackupOutcome.Failed -> if (outcome.retry && local) Result.retry() else Result.failure()
@@ -46,6 +47,8 @@ class BackupWorker @AssistedInject constructor(
         const val MODE_AUDIBLE = "audible"
         /** "Back up now": ask Audible even while backing off after a refusal. */
         const val KEY_FORCE = "force"
+        /** Back up this one Audible book (tapped in the Server tab) instead of the next in line. */
+        const val KEY_ASIN = "asin"
     }
 }
 
