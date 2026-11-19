@@ -42,7 +42,7 @@ class S3Client @Inject constructor(
         val region = settings.s3Region.trim().ifEmpty { guessRegion(base.host) }
         debugLog.log("S3", "Using ${base.host} bucket ${settings.s3Bucket} (region $region)")
         val conn = S3Connection(base, region, settings.s3AccessKey.trim(), settings.s3SecretKey.trim(),
-            settings.s3Bucket.trim(), settings.folder.trim().trim('/'), settings)
+            settings.s3Bucket.trim(), settings.folder.trim().trim('/'), settings) { debugLog.log("S3", it) }
         return try {
             block(conn)
         } catch (e: ServerException) {
@@ -87,7 +87,8 @@ class S3Connection internal constructor(
     private val bucket: String,
     /** Folder inside the bucket, without slashes; "" for the top. */
     private val prefix: String,
-    private val settings: ServerSettings
+    private val settings: ServerSettings,
+    private val log: (String) -> Unit
 ) : StorageConnection {
 
     override val root: String get() = if (prefix.isEmpty()) bucket else "$bucket/$prefix"
@@ -98,6 +99,8 @@ class S3Connection internal constructor(
         val out = mutableListOf<RemoteFile>()
         val listPrefix = if (prefix.isEmpty()) "" else "$prefix/"
         var token: String? = null
+        var objects = 0
+        val skipped = mutableListOf<String>()
         do {
             val query = sortedMapOf("list-type" to "2", "prefix" to listPrefix)
             token?.let { query["continuation-token"] = it }
@@ -105,8 +108,12 @@ class S3Connection internal constructor(
             for (m in Regex("<Contents>(.*?)</Contents>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
                 val item = m.groupValues[1]
                 val rel = tag(item, "Key")?.removePrefix(listPrefix) ?: continue
+                objects++
                 val name = rel.substringAfterLast('/')
-                if (name.startsWith(".") || name.substringAfterLast('.', "").lowercase() !in AUDIO_EXTENSIONS) continue
+                if (name.startsWith(".") || name.substringAfterLast('.', "").lowercase() !in AUDIO_EXTENSIONS) {
+                    if (skipped.size < 3) skipped.add(rel)
+                    continue
+                }
                 val size = tag(item, "Size")?.toLongOrNull() ?: 0
                 val modified = tag(item, "LastModified")?.let {
                     try { Instant.parse(it).toEpochMilli() } catch (_: Exception) { 0L }
@@ -115,7 +122,21 @@ class S3Connection internal constructor(
             }
             token = if (tag(xml, "IsTruncated") == "true") tag(xml, "NextContinuationToken") else null
         } while (token != null)
+        log("List \"$bucket\" folder \"${listPrefix.ifEmpty { "(top)" }}\": $objects objects, ${out.size} audio" +
+            if (skipped.isNotEmpty()) "; not audio e.g. ${skipped.joinToString(", ")}" else "")
+        if (objects == 0 && listPrefix.isNotEmpty()) logBucketSample()
         return out.sortedBy { it.relPath.lowercase() }
+    }
+
+    /** Nothing under the folder: log a few keys from the top of the bucket to show where the files are. */
+    private fun logBucketSample() {
+        try {
+            val xml = request("GET", null, sortedMapOf("list-type" to "2", "max-keys" to "5")).text()
+            val keys = Regex("<Key>(.*?)</Key>", RegexOption.DOT_MATCHES_ALL).findAll(xml).map { unescape(it.groupValues[1]) }.toList()
+            log(if (keys.isEmpty()) "Bucket \"$bucket\" is empty" else "Bucket \"$bucket\" starts with: ${keys.joinToString(", ")}")
+        } catch (e: Exception) {
+            log("Bucket sample failed: ${e.message}")
+        }
     }
 
     override fun upload(local: File, rel: String, progress: (Long, Long) -> Boolean) {
@@ -283,7 +304,7 @@ class S3Connection internal constructor(
         val code = tag(xml, "Code")
         val message = tag(xml, "Message")
         return when (code) {
-            "InvalidAccessKeyId", "SignatureDoesNotMatch" -> "Wrong access key ID or secret key"
+            "InvalidAccessKeyId", "SignatureDoesNotMatch" -> "Wrong access key ID or secret key ($code)"
             "NoSuchBucket" -> "Bucket \"$bucket\" not found"
             "AccessDenied" -> "Access denied — check the key is allowed to use bucket \"$bucket\""
             "AuthorizationHeaderMalformed" -> "Wrong region — ${message ?: "check the Region field"}"
