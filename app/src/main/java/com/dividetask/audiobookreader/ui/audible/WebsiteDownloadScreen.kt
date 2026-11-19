@@ -37,7 +37,12 @@ import com.dividetask.audiobookreader.audible.download.AaxImporter
 import com.dividetask.audiobookreader.audible.download.AudibleDownloadManager
 import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.debug.AppDebugLog
+import com.dividetask.audiobookreader.remote.BackupEngine
+import com.dividetask.audiobookreader.remote.BackupScheduler
+import com.dividetask.audiobookreader.remote.ServerSettings
+import com.dividetask.audiobookreader.remote.WebsiteBackupNotifier
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -49,21 +54,101 @@ class WebsiteDownloadViewModel @Inject constructor(
     tokenStore: AudibleTokenStore,
     private val aaxImporter: AaxImporter,
     private val debugLog: AppDebugLog,
-    val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog
+    val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog,
+    private val serverSettings: ServerSettings,
+    private val notifier: WebsiteBackupNotifier,
+    private val backupEngine: BackupEngine,
+    private val scheduler: BackupScheduler
 ) : ViewModel() {
-    val asin: String = checkNotNull(savedStateHandle["asin"])
+    /**
+     * Website backup ("website_backup" route, no ASIN): books not on the server are downloaded
+     * one after another with the same sign-in, each uploaded (and its phone copy deleted)
+     * before the next starts.
+     */
+    val chain: Boolean = savedStateHandle.get<String>("asin") == null
+    var asin by mutableStateOf(savedStateHandle.get<String>("asin") ?: "")
+        private set
     var title by mutableStateOf(downloadManager.pendingDownloads.value[asin]?.title ?: asin)
         private set
+
+    /** Website backup progress, shown above the browser. */
+    var chainStatus by mutableStateOf<String?>(if (chain) "Sign in to Audible if asked" else null)
+        private set
+    var chainDone by mutableStateOf(false)
+        private set
+    var backedUp by mutableStateOf(0)
+        private set
+    /** Set by the screen: search the website for the new [asin]. */
+    var onNextBook: (() -> Unit)? = null
 
     private val website = "https://www.audible.${AudibleEndpoints.getLocale(tokenStore.locale).domain}"
     val libraryUrl = "$website/library/titles"
     /** The "Download" link on the website's library page. */
-    val downloadUrl = "$website/library/download?asin=$asin&codec=AAX_44_128"
+    val downloadUrl get() = "$website/library/download?asin=$asin&codec=AAX_44_128"
 
     init {
         viewModelScope.launch {
-            audibleBookDao.getAllOnce().firstOrNull { it.asin == asin }?.let { title = it.title }
+            if (chain) {
+                debugLog.section("Website backup")
+                notifier.clearPrompt()
+                pickNext()
+            } else {
+                audibleBookDao.getAllOnce().firstOrNull { it.asin == asin }?.let { title = it.title }
+            }
         }
+    }
+
+    private suspend fun pickNext() {
+        if (notifier.isBlocked) {
+            finishChain("The Audible website refused a download — paused until ${notifier.blockedUntilText()}")
+            return
+        }
+        val next = try {
+            backupEngine.nextForWebsite()
+        } catch (e: Exception) {
+            finishChain("Can't check the server: ${e.message}")
+            return
+        }
+        if (next == null) {
+            finishChain("Every Audible book is on the server")
+            return
+        }
+        asin = next.asin
+        title = next.title
+        log("Website backup: next is \"${next.title}\" (${next.asin})")
+        chainStatus = "Finding \"${next.title}\"…"
+        onNextBook?.invoke()
+    }
+
+    private fun finishChain(message: String) {
+        log("Website backup: $message ($backedUp backed up)")
+        chainStatus = message + if (backedUp > 0) " · $backedUp backed up this session" else ""
+        chainDone = true
+    }
+
+    /** Waits for [bookAsin]'s download, then its upload, then moves to the next book. */
+    private suspend fun followUp(bookAsin: String, bookTitle: String) {
+        chainStatus = "Downloading \"$bookTitle\" from the Audible website…"
+        val result = aaxImporter.websiteResults.first { it.asin == bookAsin }
+        if (!result.ok) {
+            serverSettings.websiteBackupAsins = serverSettings.websiteBackupAsins - bookAsin
+            if (result.refused) {
+                val reason = result.error ?: "download refused"
+                requestLog.event("website-refused", "$bookAsin: $reason")
+                notifier.block("\"$bookTitle\": $reason")
+                finishChain("The Audible website refused \"$bookTitle\" ($reason) — paused until ${notifier.blockedUntilText()}")
+                return
+            }
+            log("Website backup of \"$bookTitle\" failed: ${result.error} — skipping it")
+            backupEngine.websiteFailed(bookAsin)
+        } else {
+            chainStatus = "Uploading \"$bookTitle\" to the server…"
+            scheduler.enqueueLocalBackup()
+            // The phone-copies backup uploads it, deletes the phone copy and clears it from the list
+            while (bookAsin in serverSettings.websiteBackupAsins) kotlinx.coroutines.delay(5_000)
+            backedUp++
+        }
+        pickNext()
     }
 
     /** The website library searched for the title (the website does honour searchTerm). */
@@ -84,6 +169,13 @@ class WebsiteDownloadViewModel @Inject constructor(
 
     fun startDownload(urls: List<String>, userAgent: String?) {
         log("Downloading ${urls.size} file(s): ${urls.joinToString { it.substringBefore('?') }}")
+        if (chain) {
+            serverSettings.websiteBackupAsins = serverSettings.websiteBackupAsins + asin
+            val bookAsin = asin
+            val bookTitle = title
+            // Listening before the import starts, so its result can't be missed
+            viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { followUp(bookAsin, bookTitle) }
+        }
         aaxImporter.importFromWebsite(urls, userAgent, asin, title)
     }
 
@@ -202,7 +294,7 @@ fun WebsiteDownloadScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Download from Audible website") },
+                title = { Text(if (viewModel.chain) "Back up through Audible website" else "Download from Audible website") },
                 navigationIcon = {
                     IconButton(onClick = onDone) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -213,7 +305,11 @@ fun WebsiteDownloadScreen(
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
             Text(
-                when (phase) {
+                viewModel.chainStatus?.let { status ->
+                    if (phase == Phase.SIGNING_IN && !viewModel.chainDone) "Sign in to Audible if asked. Books not on the server are " +
+                        "then downloaded, uploaded and removed from the phone one at a time — keep this screen open."
+                    else status
+                } ?: when (phase) {
                     Phase.SIGNING_IN -> "Sign in to Audible if asked. \"${viewModel.title}\" will then download in the background."
                     Phase.FINDING -> "Finding \"${viewModel.title}\"…"
                 },
@@ -251,7 +347,7 @@ fun WebsiteDownloadScreen(
                             handedOff = true
                             cookieManager.flush()
                             viewModel.startDownload(urls, settings.userAgentString)
-                            onDone()
+                            if (!viewModel.chain) onDone()
                         }
 
                         fun noLinks(view: WebView) {
@@ -320,6 +416,20 @@ fun WebsiteDownloadScreen(
                         // The library page may fill in after it loads, so look a few times
                         val page = 1
                         var searched = false
+                        var signedIn = false
+
+                        // Website backup: search for the next book with the same sign-in
+                        fun startBook(view: WebView) {
+                            if (viewModel.asin.isEmpty()) return
+                            handedOff = false
+                            searched = false
+                            partLinks.clear()
+                            waitingForPart = 0
+                            phase = Phase.FINDING
+                            view.loadUrl(viewModel.pageUrl(page))
+                        }
+                        val webView = this
+                        viewModel.onNextBook = { webView.post { if (signedIn) startBook(webView) } }
                         fun findLinks(view: WebView, attempt: Int) {
                             view.evaluateJavascript(findLinksScript(viewModel.asin)) { result ->
                                 val hrefs = try {
@@ -397,8 +507,14 @@ fun WebsiteDownloadScreen(
                                     // Signed in once the website shows the library: search it for the book
                                     Phase.SIGNING_IN -> {
                                         viewModel.log("Signed in — searching the library")
-                                        phase = Phase.FINDING
-                                        view.loadUrl(viewModel.pageUrl(page))
+                                        signedIn = true
+                                        if (viewModel.chain) {
+                                            // The next book may still be being picked; it starts the search when ready
+                                            if (viewModel.asin.isNotEmpty() && !viewModel.chainDone) startBook(view)
+                                        } else {
+                                            phase = Phase.FINDING
+                                            view.loadUrl(viewModel.pageUrl(page))
+                                        }
                                     }
                                     Phase.FINDING -> if (!searched && uri.getQueryParameter("page") == page.toString()) {
                                         searched = true

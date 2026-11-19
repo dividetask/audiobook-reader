@@ -57,6 +57,7 @@ class ServerSettingsViewModel @Inject constructor(
     private val settings: ServerSettings,
     private val storage: RemoteStorage,
     private val scheduler: BackupScheduler,
+    private val websiteNotifier: com.dividetask.audiobookreader.remote.WebsiteBackupNotifier,
     engine: BackupEngine
 ) : ViewModel() {
 
@@ -179,6 +180,19 @@ class ServerSettingsViewModel @Inject constructor(
         scheduler.applySchedule()
     }
 
+    var websiteBackup by mutableStateOf(settings.websiteBackup)
+        private set
+
+    fun updateWebsiteBackup(value: Boolean) {
+        settings.websiteBackup = value
+        websiteBackup = value
+    }
+
+    /** "Paused until …" while the website refused a download in the last day; null otherwise. */
+    val websitePaused: String?
+        get() = if (websiteNotifier.isBlocked) "Paused until ${websiteNotifier.blockedUntilText()}" +
+            settings.websiteBlockedReason.takeIf { it.isNotEmpty() }?.let { " — $it" }.orEmpty() else null
+
     fun updateFrequency(value: BackupFrequency) {
         settings.frequency = value
         frequency = value
@@ -202,7 +216,7 @@ class ServerSettingsViewModel @Inject constructor(
 }
 
 @Composable
-fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) {
+fun ServerSettingsSection(onWebsiteBackup: () -> Unit = {}, viewModel: ServerSettingsViewModel = hiltViewModel()) {
     val status by viewModel.status.collectAsState()
     val backupNowPending by viewModel.backupNowPending.collectAsState()
     val audibleBackupState by viewModel.audibleBackupState.collectAsState()
@@ -372,6 +386,27 @@ fun ServerSettingsSection(viewModel: ServerSettingsViewModel = hiltViewModel()) 
                 if (audibleBackupState == WorkInfo.State.ENQUEUED) {
                     Text("Next Audible book waiting for charging and idle",
                         style = MaterialTheme.typography.bodySmall, color = muted)
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = viewModel.websiteBackup, onCheckedChange = { viewModel.updateWebsiteBackup(it) })
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Use the Audible website when Audible limits downloads", style = MaterialTheme.typography.bodyMedium)
+                        Text("A notification asks you to sign in to the Audible website. Every book not on the " +
+                            "server is then downloaded there, uploaded and removed from the phone, one after another. " +
+                            "If the website refuses a download, it stops for a day.",
+                            style = MaterialTheme.typography.bodySmall, color = muted)
+                    }
+                }
+                if (viewModel.websiteBackup) {
+                    val paused = viewModel.websitePaused
+                    if (paused != null) {
+                        Text(paused, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    } else {
+                        OutlinedButton(onClick = onWebsiteBackup, modifier = Modifier.fillMaxWidth()) {
+                            Text("Back up everything through the website now")
+                        }
+                    }
                 }
             }
 

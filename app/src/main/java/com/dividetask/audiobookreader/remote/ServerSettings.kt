@@ -136,6 +136,26 @@ class ServerSettings @Inject constructor(
     private fun s3Uploads(): Map<String, String> = str("s3_uploads", "").split("\n")
         .filter { it.contains('\t') }.associate { it.substringBefore('\t') to it.substringAfter('\t') }
 
+    /** When Audible's download limit stops the backup, ask the user to back up through the Audible website. */
+    var websiteBackup: Boolean
+        get() = try { prefs.getBoolean("website_backup", false) } catch (_: Exception) { false }
+        set(value) { try { prefs.edit().putBoolean("website_backup", value).apply() } catch (_: Exception) {} }
+
+    /** The Audible website refused a download: no website backups before this time (ms). */
+    var websiteBlockedUntil: Long
+        get() = try { prefs.getLong("website_blocked_until", 0L) } catch (_: Exception) { 0L }
+        set(value) { try { prefs.edit().putLong("website_blocked_until", value).apply() } catch (_: Exception) {} }
+
+    /** Why the website was paused, for Settings. */
+    var websiteBlockedReason: String
+        get() = str("website_blocked_reason", "")
+        set(value) = putStr("website_blocked_reason", value)
+
+    /** ASINs downloaded from the website only to back them up: the phone copy is deleted once uploaded. */
+    var websiteBackupAsins: Set<String>
+        get() = str("website_backup_asins", "").split("\n").filter { it.isNotBlank() }.toSet()
+        set(value) = putStr("website_backup_asins", value.joinToString("\n"))
+
     /** Upload IDs of unfinished uploads the user chose to keep, so they aren't offered again. */
     var keptUploads: Set<String>
         get() = str("kept_uploads", "").split("\n").filter { it.isNotBlank() }.toSet()

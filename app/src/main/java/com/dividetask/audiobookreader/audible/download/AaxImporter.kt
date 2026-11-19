@@ -24,6 +24,9 @@ import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** How a website download ended. [refused] = the Audible website turned the download away. */
+data class WebsiteImportResult(val asin: String, val ok: Boolean, val error: String? = null, val refused: Boolean = false)
+
 data class AaxImportStatus(
     val title: String,
     val step: String,
@@ -62,6 +65,9 @@ class AaxImporter @Inject constructor(
     /** The book being downloaded from the website, which isn't "pending" while that runs. */
     private val _websiteAsin = MutableStateFlow<String?>(null)
     val websiteAsin: StateFlow<String?> = _websiteAsin.asStateFlow()
+
+    private val _websiteResults = kotlinx.coroutines.flow.MutableSharedFlow<WebsiteImportResult>(extraBufferCapacity = 8)
+    val websiteResults: kotlinx.coroutines.flow.SharedFlow<WebsiteImportResult> = _websiteResults
 
     private val audiobooksDir: File
         get() = File(context.getExternalFilesDir(null), "audiobooks").apply { mkdirs() }
@@ -257,19 +263,25 @@ class AaxImporter @Inject constructor(
         scope.launch {
             mutex.withLock {
                 _websiteAsin.value = asin
+                var fetchError: String? = null
                 try {
-                    runImport("$title.aax", knownAsin = asin) { dir, step, progress ->
+                    val ok = runImport("$title.aax", knownAsin = asin) { dir, step, progress ->
                         val files = mutableListOf<File>()
                         for ((i, url) in urls.withIndex()) {
                             val label = if (urls.size > 1) "Downloading part ${i + 1} of ${urls.size}" else "Downloading from Audible website"
                             step(label)
                             val part = File(dir, "part${i + 1}.aax")
                             downloadWaitingForConnection(url, userAgent, part, label, step) { progress(label, it) }
-                                ?.let { return@runImport Fetched(error = it) }
+                                ?.let { fetchError = it; return@runImport Fetched(error = it) }
                             files += part
                         }
                         Fetched(files)
                     }
+                    val error = fetchError
+                    // No connection at all isn't the website refusing
+                    _websiteResults.tryEmit(WebsiteImportResult(asin, ok,
+                        error = if (ok) null else error ?: _status.value?.step,
+                        refused = error != null && !error.startsWith("Can't reach")))
                 } finally {
                     _websiteAsin.value = null
                 }
@@ -453,7 +465,7 @@ class AaxImporter @Inject constructor(
         displayName: String,
         knownAsin: String?,
         fetch: suspend (File, (String) -> Unit, (String, Float) -> Unit) -> Fetched
-    ) {
+    ): Boolean {
         debugLog.section("Import AAX: $displayName")
         var title = displayName.substringBeforeLast('.')
         importDir.listFiles()?.forEach { it.delete() }
@@ -470,10 +482,11 @@ class AaxImporter @Inject constructor(
             lastProgressAt = now
             _status.value = AaxImportStatus(title, text, progress = fraction)
         }
-        fun fail(text: String) {
+        fun fail(text: String): Boolean {
             debugLog.log("IMPORT", "FAILED: $text")
             _status.value = AaxImportStatus(title, "Import failed: $text", finished = true)
             importDir.listFiles()?.forEach { it.delete() }
+            return false
         }
 
         try {
@@ -560,8 +573,9 @@ class AaxImporter @Inject constructor(
             // No longer waiting on Audible's download limit
             match?.asin?.let { pendingStore.remove(it) }
             _status.value = AaxImportStatus(title, "Imported \"$title\"", finished = true)
+            return true
         } catch (e: Exception) {
-            fail("${e::class.simpleName}: ${e.message}")
+            return fail("${e::class.simpleName}: ${e.message}")
         }
     }
 

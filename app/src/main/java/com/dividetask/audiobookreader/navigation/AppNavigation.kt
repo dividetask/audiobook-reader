@@ -31,8 +31,18 @@ import com.dividetask.audiobookreader.ui.settings.DebugLogScreen
 import com.dividetask.audiobookreader.ui.settings.SettingsScreen
 
 @Composable
-fun AppNavigation(debugLog: AppDebugLog) {
+fun AppNavigation(
+    debugLog: AppDebugLog,
+    openWebsiteBackup: Boolean = false,
+    onWebsiteBackupOpened: () -> Unit = {}
+) {
     val navController = rememberNavController()
+    androidx.compose.runtime.LaunchedEffect(openWebsiteBackup) {
+        if (openWebsiteBackup) {
+            navController.navigate("website_backup")
+            onWebsiteBackupOpened()
+        }
+    }
     val miniPlayer: MiniPlayerViewModel = hiltViewModel()
     val playbackState by miniPlayer.playbackState.collectAsState()
     val currentRoute = navController.currentBackStackEntryAsState().value?.destination?.route
@@ -62,6 +72,9 @@ fun AppNavigation(debugLog: AppDebugLog) {
                             navController.navigate("website_download/$asin")
                         }
                     )
+                }
+                composable("website_backup") {
+                    WebsiteDownloadScreen(onDone = { navController.popBackStack() })
                 }
                 composable(
                     "website_download/{asin}",
@@ -99,7 +112,8 @@ fun AppNavigation(debugLog: AppDebugLog) {
                     SettingsScreen(
                         onBack = { navController.popBackStack() },
                         onAudibleLogin = { navController.navigate("audible_login") },
-                        onDebugLog = { navController.navigate("debug_log") }
+                        onDebugLog = { navController.navigate("debug_log") },
+                        onWebsiteBackup = { navController.navigate("website_backup") }
                     )
                 }
                 composable("debug_log") {

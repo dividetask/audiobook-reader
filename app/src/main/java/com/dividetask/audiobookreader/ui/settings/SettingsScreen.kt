@@ -57,6 +57,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onAudibleLogin: () -> Unit,
     onDebugLog: () -> Unit,
+    onWebsiteBackup: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     var showConfirmDialog by remember { mutableStateOf(false) }
@@ -294,7 +295,7 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(24.dp))
 
             // === Server sync (SFTP or S3) ===
-            ServerSettingsSection()
+            ServerSettingsSection(onWebsiteBackup = onWebsiteBackup)
 
             Spacer(modifier = Modifier.height(24.dp))
 

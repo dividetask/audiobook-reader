@@ -83,6 +83,7 @@ class BackupEngine @Inject constructor(
     private val tokenStore: AudibleTokenStore,
     private val seriesRepository: SeriesRepository,
     private val bookRepository: BookRepository,
+    private val websiteBackup: WebsiteBackupNotifier,
     private val debugLog: AppDebugLog
 ) {
     private val mutex = Mutex()
@@ -261,6 +262,11 @@ class BackupEngine @Inject constructor(
                     done++
                     settings.failures = settings.failures - key
                     debugLog.log("BACKUP", "Uploaded: ${copy.book.title}")
+                    // Downloaded from the website only to back it up: the phone copy goes, as for Audible backups
+                    if (copy.asin != null && copy.asin in settings.websiteBackupAsins) {
+                        removePhoneCopy(copy)
+                        settings.websiteBackupAsins = settings.websiteBackupAsins - copy.asin
+                    }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     // Wrong settings aren't the book's fault: don't count it towards skipping the book
@@ -292,6 +298,7 @@ class BackupEngine @Inject constructor(
         if (!settings.isConfigured) return finish(BackupOutcome.Failed("Server not set up", retry = false))
         if (!tokenStore.isAuthenticated) return finish(BackupOutcome.Failed("Not signed in to Audible", retry = false))
         if (!force && apiClient.isThrottled) {
+            websiteBackup.promptThrottled(null)
             return finish(BackupOutcome.Failed(apiClient.throttleMessage(), retry = false), prefix = "Audible")
         }
 
@@ -343,6 +350,7 @@ class BackupEngine @Inject constructor(
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 if (e is AudibleThrottledException) {
+                    websiteBackup.promptThrottled(book.title)
                     return finish(BackupOutcome.Failed(e.message ?: "Throttled by Audible", retry = true), prefix = "Audible")
                 }
                 if (e is ServerException && e.settingsProblem) {
@@ -367,6 +375,35 @@ class BackupEngine @Inject constructor(
     }
 
     private fun localKey(book: BookEntity) = "book:${book.id}"
+
+    private suspend fun removePhoneCopy(copy: LocalCopy) {
+        bookRepository.deleteBook(copy.book.id)
+        listOf(copy.file, File(copy.file.parentFile, "${copy.file.nameWithoutExtension}.aax"))
+            .filter { it.exists() && it.delete() }
+            .forEach { debugLog.log("BACKUP", "Removed phone copy after upload: ${it.name}") }
+    }
+
+    /**
+     * The next Audible book for the website backup: not on the phone, not on the server, not
+     * given up on. Null when every book is backed up.
+     */
+    suspend fun nextForWebsite(): AudibleBookEntity? = withContext(Dispatchers.IO) {
+        val library = audibleBookDao.getAllOnce()
+        val onPhone = localCopies(library.associateBy { it.asin }).mapNotNull { it.asin }.toSet()
+        // Forget website downloads that never reached the phone (e.g. the app closed mid-download)
+        settings.websiteBackupAsins = settings.websiteBackupAsins.intersect(onPhone)
+        val onServer = serverPaths()
+        val failures = settings.failures
+        library.firstOrNull {
+            it.asin !in onPhone && remoteBase(it).lowercase() !in onServer &&
+                (failures[it.asin] ?: 0) < MAX_FAILURES
+        }
+    }
+
+    /** A website backup of [asin] failed for a reason other than a refusal: counts towards skipping it. */
+    fun websiteFailed(asin: String) {
+        settings.failures = settings.failures + (asin to (settings.failures[asin] ?: 0) + 1)
+    }
 
     /** The network went away or the storage had a hiccup: not the book's fault, so not counted against it. */
     private fun isConnectionProblem(e: Throwable): Boolean {
