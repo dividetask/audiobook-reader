@@ -287,6 +287,15 @@ class S3Connection internal constructor(
             val code = conn.responseCode
             if (code !in 200..299) {
                 val error = conn.errorStream?.use { it.readBytes() }?.let { String(it) } ?: ""
+                if (tag(error, "Code") == "SignatureDoesNotMatch") {
+                    // Compare what we signed with what the server says it expected
+                    val oneLine = { t: String -> t.replace("\n", " | ") }
+                    log("Signature mismatch on $method ${url.path}${url.query?.let { "?$it" } ?: ""} (HTTP $code)")
+                    log("We signed: ${oneLine(canonicalRequest)}")
+                    tag(error, "CanonicalRequest")?.let { log("Server expected: ${oneLine(it)}") }
+                    tag(error, "StringToSign")?.let { log("Server string to sign: ${oneLine(it)}") }
+                    tag(error, "Message")?.let { log("Server message: $it") }
+                }
                 throw ServerException(errorMessage(code, error), settingsProblem = tag(error, "Code") in SETTINGS_ERRORS)
             }
             if (sink != null) {
