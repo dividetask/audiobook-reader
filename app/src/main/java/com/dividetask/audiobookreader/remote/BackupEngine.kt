@@ -50,7 +50,9 @@ data class BackupStatus(
     val title: String = "",
     val bytes: Long = 0,
     val total: Long = 0,
-    val remaining: Int = 0
+    val remaining: Int = 0,
+    /** Server path being uploaded (relative to the folder), "" when not uploading. */
+    val path: String = ""
 )
 
 sealed class BackupOutcome {
@@ -89,6 +91,10 @@ class BackupEngine @Inject constructor(
     /** Unfinished uploads on the server this phone won't continue, waiting for the user to decide. */
     private val _abandoned = MutableStateFlow<List<UnfinishedUpload>>(emptyList())
     val abandoned: StateFlow<List<UnfinishedUpload>> = _abandoned.asStateFlow()
+
+    /** Books waiting to be uploaded in this run, after the current one: title → server path. */
+    private val _queue = MutableStateFlow<List<Pair<String, String>>>(emptyList())
+    val queue: StateFlow<List<Pair<String, String>>> = _queue.asStateFlow()
 
     private val _status = MutableStateFlow(BackupStatus())
     val status: StateFlow<BackupStatus> = _status.asStateFlow()
@@ -184,6 +190,7 @@ class BackupEngine @Inject constructor(
             try {
                 block()
             } finally {
+                _queue.value = emptyList()
                 _status.value = BackupStatus()
                 notificationManager.cancel(NOTIFICATION_ID)
             }
@@ -241,10 +248,12 @@ class BackupEngine @Inject constructor(
                     (failures[localKey(it.book)] ?: 0) < MAX_FAILURES
             }
             if (pending.isEmpty()) break
+            _queue.value = pending.map { it.book.title to "${it.remoteBase}.${it.file.extension}" }
             debugLog.log("BACKUP", "${pending.size} phone copies to upload")
             for ((i, copy) in pending.withIndex()) {
                 currentCoroutineContext().ensureActive()
                 tried += copy.book.id
+                _queue.value = pending.drop(i + 1).map { it.book.title to "${it.remoteBase}.${it.file.extension}" }
                 val key = localKey(copy.book)
                 try {
                     upload(copy.file, copy.remoteBase, copy.book.title, pending.size - i)
@@ -419,14 +428,14 @@ class BackupEngine @Inject constructor(
     private suspend fun upload(file: File, remoteBase: String, title: String, remaining: Int) {
         val rel = "$remoteBase.${file.extension}"
         val ctx = currentCoroutineContext()
-        setStatus(BackupStatus(BackupPhase.UPLOADING, title, 0, file.length(), remaining))
+        setStatus(BackupStatus(BackupPhase.UPLOADING, title, 0, file.length(), remaining, rel))
         var lastUpdate = 0L
         storage.use { conn ->
             conn.upload(file, rel) { done, total ->
                 val now = System.currentTimeMillis()
                 if (now - lastUpdate > 1000) {
                     lastUpdate = now
-                    setStatus(BackupStatus(BackupPhase.UPLOADING, title, done, total, remaining))
+                    setStatus(BackupStatus(BackupPhase.UPLOADING, title, done, total, remaining, rel))
                 }
                 ctx.isActive
             }

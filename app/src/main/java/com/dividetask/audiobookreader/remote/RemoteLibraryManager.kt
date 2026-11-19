@@ -49,6 +49,10 @@ class RemoteLibraryManager @Inject constructor(
     private val _files = MutableStateFlow<List<RemoteFile>>(emptyList())
     val files: StateFlow<List<RemoteFile>> = _files.asStateFlow()
 
+    /** Uploads started on the server but not finished (S3 only). */
+    private val _unfinished = MutableStateFlow<List<UnfinishedUpload>>(emptyList())
+    val unfinished: StateFlow<List<UnfinishedUpload>> = _unfinished.asStateFlow()
+
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
@@ -74,8 +78,17 @@ class RemoteLibraryManager @Inject constructor(
             _isLoading.value = true
             _error.value = null
             try {
-                _files.value = storage.use { it.listAudio() }
-                debugLog.log("SFTP", "Server has ${_files.value.size} audio files")
+                storage.use { conn ->
+                    _files.value = conn.listAudio()
+                    _unfinished.value = try {
+                        conn.unfinishedUploads()
+                    } catch (e: Exception) {
+                        debugLog.log("SFTP", "Could not list unfinished uploads: ${e.message}")
+                        emptyList()
+                    }
+                }
+                debugLog.log("SFTP", "Server has ${_files.value.size} audio files" +
+                    if (_unfinished.value.isNotEmpty()) ", ${_unfinished.value.size} unfinished uploads" else "")
             } catch (e: Exception) {
                 debugLog.log("SFTP", "List failed: ${e.message}")
                 _error.value = e.message ?: "Could not reach server"

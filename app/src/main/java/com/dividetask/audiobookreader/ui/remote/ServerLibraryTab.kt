@@ -49,13 +49,34 @@ import com.dividetask.audiobookreader.ui.common.groupBySeries
 import com.dividetask.audiobookreader.ui.common.matchesSearch
 import com.dividetask.audiobookreader.remote.RemoteFile
 import com.dividetask.audiobookreader.remote.RemoteLibraryManager
+import androidx.lifecycle.viewModelScope
+import com.dividetask.audiobookreader.remote.BackupEngine
+import com.dividetask.audiobookreader.remote.BackupPhase
+import com.dividetask.audiobookreader.remote.BackupStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
 class ServerLibraryViewModel @Inject constructor(
-    val manager: RemoteLibraryManager
-) : ViewModel()
+    val manager: RemoteLibraryManager,
+    backupEngine: BackupEngine
+) : ViewModel() {
+    val backupStatus: StateFlow<BackupStatus> = backupEngine.status
+    val uploadQueue: StateFlow<List<Pair<String, String>>> = backupEngine.queue
+
+    init {
+        // An upload ended (finished or stopped): list the server again so a finished book shows up
+        viewModelScope.launch {
+            var last = ""
+            backupEngine.status.collect { status ->
+                if (last.isNotEmpty() && status.path != last) manager.refresh()
+                last = status.path
+            }
+        }
+    }
+}
 
 /**
  * The "Server" tab: audio files in the sync folder (SFTP or S3), each downloadable into the library.
@@ -87,6 +108,12 @@ fun ServerLibraryTab(
     val isLoading by manager.isLoading.collectAsState()
     val error by manager.error.collectAsState()
     val downloads by manager.downloads.collectAsState()
+    val backup by viewModel.backupStatus.collectAsState()
+    val queue by viewModel.uploadQueue.collectAsState()
+    val unfinished by manager.unfinished.collectAsState()
+    val uploads = remember(backup, queue, unfinished, searchQuery) {
+        uploadRows(backup, queue, unfinished).filter { matchesSearch(searchQuery, it.title, it.folder, null) }
+    }
 
     if (!manager.isConfigured) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -133,6 +160,13 @@ fun ServerLibraryTab(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(16.dp)
         ) {
+            if (uploads.isNotEmpty()) {
+                item(key = "uploads_header") {
+                    Text("Uploading to server", style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary)
+                }
+                uploads.forEach { row -> item(key = "upload_${row.key}") { UploadItem(row) } }
+            }
             if (files.isNotEmpty()) item(key = "sort") { SortMenu(SortTab.SERVER, sortOrder, onSortChange) }
             bookListEntries(
                 entries = entries,
@@ -164,6 +198,70 @@ fun ServerLibraryTab(
                     }
                 }
             )
+        }
+    }
+}
+
+/** A book on its way to the server: being uploaded, waiting, or partly uploaded by an earlier run. */
+private data class UploadRow(
+    val key: String,
+    val title: String,
+    val folder: String,
+    val status: String,
+    /** null = no progress bar; -1 = indeterminate. */
+    val fraction: Float?
+)
+
+private fun uploadRows(
+    backup: BackupStatus,
+    queue: List<Pair<String, String>>,
+    unfinished: List<com.dividetask.audiobookreader.remote.UnfinishedUpload>
+): List<UploadRow> {
+    val rows = mutableListOf<UploadRow>()
+    val mb = { b: Long -> b / 1_048_576 }
+    when (backup.phase) {
+        BackupPhase.UPLOADING -> rows.add(UploadRow("current", backup.title, folderOf(backup.path),
+            "Uploading · ${mb(backup.bytes)} of ${mb(backup.total)} MB",
+            if (backup.total > 0) backup.bytes.toFloat() / backup.total else -1f))
+        BackupPhase.DOWNLOADING -> rows.add(UploadRow("current", backup.title, "",
+            "Downloading from Audible, then uploading" +
+                if (backup.total > 0) " · ${mb(backup.bytes)} of ${mb(backup.total)} MB" else "",
+            if (backup.total > 0) backup.bytes.toFloat() / backup.total else -1f))
+        BackupPhase.CONVERTING -> rows.add(UploadRow("current", backup.title, "", "Converting, then uploading", -1f))
+        else -> {}
+    }
+    val queued = queue.map { it.second }.toSet()
+    val byPath = unfinished.groupBy { it.relPath }
+    queue.forEach { (title, path) ->
+        val partial = byPath[path]?.maxOfOrNull { it.size } ?: 0
+        rows.add(UploadRow("queued_$path", title, folderOf(path),
+            "Waiting to upload" + if (partial > 0) " · ${mb(partial)} MB already on server" else "", null))
+    }
+    byPath.filterKeys { it != backup.path && it !in queued }.forEach { (path, list) ->
+        val size = list.maxOf { it.size }
+        rows.add(UploadRow("partial_$path", path.substringAfterLast('/').substringBeforeLast('.'), folderOf(path),
+            "Upload not finished · ${mb(size)} MB on server", null))
+    }
+    return rows
+}
+
+private fun folderOf(path: String) = path.substringBeforeLast('/', "").substringAfterLast('/')
+
+@Composable
+private fun UploadItem(row: UploadRow) {
+    Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(row.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                listOf(row.folder, row.status).filter { it.isNotEmpty() }.joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            row.fraction?.let { f ->
+                Spacer(modifier = Modifier.height(4.dp))
+                if (f < 0f) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                else LinearProgressIndicator(progress = { f }, modifier = Modifier.fillMaxWidth())
+            }
         }
     }
 }
