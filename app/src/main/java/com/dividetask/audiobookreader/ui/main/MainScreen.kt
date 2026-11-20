@@ -79,6 +79,7 @@ import com.dividetask.audiobookreader.ui.common.BookListEntry
 import com.dividetask.audiobookreader.ui.common.PauseIcon
 import com.dividetask.audiobookreader.ui.common.SeriesMember
 import com.dividetask.audiobookreader.ui.common.SeriesPlaceholderItem
+import com.dividetask.audiobookreader.ui.libro.LibroTab
 import com.dividetask.audiobookreader.ui.common.SortMenu
 import com.dividetask.audiobookreader.ui.common.SortOrder
 import com.dividetask.audiobookreader.ui.common.SortTab
@@ -125,6 +126,8 @@ fun MainScreen(
     val websiteOffer by viewModel.websiteOffer.collectAsState()
     val abandonedUploads by viewModel.abandonedUploads.collectAsState()
     val convertingBookId by viewModel.convertingBookId.collectAsState()
+    val libroQueue by viewModel.libroQueue.collectAsState()
+    val libroCurrent by viewModel.libroCurrent.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var bookToDelete by remember { mutableStateOf<BookEntity?>(null) }
     var audibleBookToDelete by remember { mutableStateOf<AudibleBookEntity?>(null) }
@@ -172,7 +175,31 @@ fun MainScreen(
                 onWebsite = { onWebsiteDownload(owned.asin) }
             )
         } else {
-            SeriesPlaceholderItem(member, "Not purchased")
+            // Bought on Libro.fm instead
+            val libro = seriesIndex.libroMatch(member.title)
+            when {
+                libro == null -> SeriesPlaceholderItem(member, "Not purchased")
+                viewModel.isLibroDownloaded(libro.isbn) -> SeriesPlaceholderItem(member, "On device · from Libro.fm") {
+                    Icon(Icons.Default.CheckCircle, contentDescription = "On device",
+                        modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.primary)
+                }
+                libro.isbn == libroCurrent -> SeriesPlaceholderItem(member, "Downloading from Libro.fm") {
+                    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(modifier = Modifier.size(36.dp), strokeWidth = 3.dp)
+                    }
+                }
+                libro.isbn in libroQueue -> SeriesPlaceholderItem(member, "Waiting to download from Libro.fm") {
+                    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Queued",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
+                    }
+                }
+                else -> SeriesPlaceholderItem(member, "Owned on Libro.fm") {
+                    IconButton(onClick = { viewModel.downloadLibro(libro) }) {
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Download from Libro.fm", modifier = Modifier.size(32.dp))
+                    }
+                }
+            }
         }
     }
 
@@ -210,7 +237,7 @@ fun MainScreen(
     }
 
     LaunchedEffect(selectedTab) {
-        if (selectedTab == 1 || selectedTab == 3) {
+        if (selectedTab == 1 || selectedTab == 4) {
             viewModel.syncAudibleLibrary()
         }
     }
@@ -238,8 +265,10 @@ fun MainScreen(
                     Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 },
                         text = { Text("Audible") })
                     Tab(selected = selectedTab == 2, onClick = { selectedTab = 2 },
-                        text = { Text("Server") })
+                        text = { Text("Libro.fm", maxLines = 1, softWrap = false) })
                     Tab(selected = selectedTab == 3, onClick = { selectedTab = 3 },
+                        text = { Text("Server") })
+                    Tab(selected = selectedTab == 4, onClick = { selectedTab = 4 },
                         text = { Text("All") })
                 }
                 // One search box filters whichever tab is showing
@@ -279,7 +308,7 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            if (isSyncing && (selectedTab == 1 || selectedTab == 3)) {
+            if (isSyncing && (selectedTab == 1 || selectedTab == 4)) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
 
@@ -354,18 +383,29 @@ fun MainScreen(
                             )
                         }
                     }
-                    2 -> ServerLibraryTab(
+                    2 -> LibroTab(
+                        onOpenSettings = onSettingsClick,
+                        searchQuery = searchQuery,
+                        seriesIndex = seriesIndex,
+                        expandedSeries = expandedSeries,
+                        onToggleSeries = toggleSeries,
+                        missingSeriesBook = missingSeriesBook,
+                        sortOrder = sortOf(SortTab.LIBRO),
+                        onSortChange = { viewModel.setSortOrder(SortTab.LIBRO, it) }
+                    )
+                    3 -> ServerLibraryTab(
                         onOpenSettings = onSettingsClick,
                         searchQuery = searchQuery,
                         seriesIndex = seriesIndex,
                         expandedSeries = expandedSeries,
                         onToggleSeries = toggleSeries,
                         isAudibleDownloaded = { viewModel.isBookDownloaded(it) },
+                        isLibroDownloaded = { viewModel.isLibroDownloaded(it) },
                         onAudibleDownload = { viewModel.downloadAudibleBook(it) },
                         sortOrder = sortOf(SortTab.SERVER),
                         onSortChange = { viewModel.setSortOrder(SortTab.SERVER, it) }
                     )
-                    3 -> {
+                    4 -> {
                         AllBooksList(
                             localBooks = localBooks,
                             audibleBooks = if (viewModel.isAudibleAuthenticated) audibleBooks else emptyList(),
@@ -389,7 +429,7 @@ fun MainScreen(
             }
 
             // Pull down on the Audible lists to re-sync the library with Amazon
-            if (selectedTab == 1 || selectedTab == 3) {
+            if (selectedTab == 1 || selectedTab == 4) {
                 PullToRefreshBox(
                     isRefreshing = isSyncing,
                     onRefresh = { viewModel.syncAudibleLibrary(force = true) },

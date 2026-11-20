@@ -19,8 +19,19 @@ class SeriesIndex(
     library: List<AudibleBookEntity> = emptyList(),
     seriesBooks: List<SeriesBookEntity> = emptyList(),
     lookups: List<SeriesLookupEntity> = emptyList(),
-    series: List<SeriesEntity> = emptyList()
+    series: List<SeriesEntity> = emptyList(),
+    libro: List<com.dividetask.audiobookreader.data.db.entity.LibroBookEntity> = emptyList()
 ) {
+    private val libroByTitle = libro.groupBy { normalize(it.title) }
+
+    /** The Libro.fm book with this title (and author, when both are known), if the user owns one. */
+    fun libroMatch(title: String, author: String? = null): com.dividetask.audiobookreader.data.db.entity.LibroBookEntity? {
+        val matches = libroByTitle[normalize(title)].orEmpty()
+        val wanted = author?.takeUnless { it.isBlank() || it.startsWith("Unknown") }?.let(::normalize)
+        return matches.firstOrNull { wanted == null || normalize(it.author).contains(wanted) || wanted.contains(normalize(it.author)) }
+            ?: matches.firstOrNull().takeIf { wanted == null }
+    }
+
     val libraryByAsin: Map<String, AudibleBookEntity> = library.associateBy { it.asin }
     private val libraryByTitle = library.groupBy { normalize(it.title) }
     private val lookupsByKey = lookups.associateBy { it.key }

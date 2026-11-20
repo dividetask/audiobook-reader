@@ -8,7 +8,9 @@ import com.dividetask.audiobookreader.data.db.dao.AudibleBookDao
 import com.dividetask.audiobookreader.data.db.dao.BookDao
 import com.dividetask.audiobookreader.data.db.dao.ChapterDao
 import com.dividetask.audiobookreader.data.db.dao.HistoryDao
+import com.dividetask.audiobookreader.data.db.dao.LibroBookDao
 import com.dividetask.audiobookreader.data.db.dao.SeriesDao
+import com.dividetask.audiobookreader.data.db.entity.LibroBookEntity
 import com.dividetask.audiobookreader.data.db.entity.AudibleBookEntity
 import com.dividetask.audiobookreader.data.db.entity.BookEntity
 import com.dividetask.audiobookreader.data.db.entity.ChapterEntity
@@ -108,13 +110,34 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
     }
 }
 
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS libro_books (
+                isbn TEXT NOT NULL PRIMARY KEY,
+                title TEXT NOT NULL,
+                author TEXT NOT NULL,
+                narrator TEXT,
+                durationSec INTEGER,
+                sizeBytes INTEGER,
+                coverUrl TEXT,
+                seriesTitle TEXT,
+                seriesNum TEXT,
+                addedAt TEXT,
+                lastSynced INTEGER NOT NULL
+            )
+        """)
+    }
+}
+
 @Database(
     entities = [
         BookEntity::class, ChapterEntity::class, AudibleBookEntity::class,
         ListenSessionEntity::class, PositionJumpEntity::class,
-        SeriesEntity::class, SeriesBookEntity::class, SeriesLookupEntity::class
+        SeriesEntity::class, SeriesBookEntity::class, SeriesLookupEntity::class,
+        LibroBookEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -123,4 +146,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun audibleBookDao(): AudibleBookDao
     abstract fun historyDao(): HistoryDao
     abstract fun seriesDao(): SeriesDao
+    abstract fun libroBookDao(): LibroBookDao
 }

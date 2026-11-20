@@ -63,7 +63,7 @@ class MainViewModel @Inject constructor(
             val backupLine = backup.takeIf { it.phase != BackupPhase.IDLE }?.let { b ->
                 val action = when (b.phase) {
                     BackupPhase.CHECKING -> "Server backup — checking"
-                    BackupPhase.DOWNLOADING -> "Server backup — downloading from Audible"
+                    BackupPhase.DOWNLOADING -> "Server backup — downloading"
                     BackupPhase.CONVERTING -> "Server backup — converting"
                     BackupPhase.UPLOADING -> "Server backup — uploading"
                     BackupPhase.CANCELLING -> "Server backup — cancelling unfinished upload"
@@ -87,6 +87,13 @@ class MainViewModel @Inject constructor(
     }
 
     fun keepAbandonedUploads() = backupEngine.keepAbandoned()
+
+    val libroQueue = aaxImporter.libroQueue
+    val libroCurrent = aaxImporter.libroIsbn
+
+    fun isLibroDownloaded(isbn: String) = aaxImporter.isLibroDownloaded(isbn)
+
+    fun downloadLibro(book: com.dividetask.audiobookreader.data.db.entity.LibroBookEntity) = aaxImporter.downloadLibro(book)
 
     val localBooks: StateFlow<List<BookEntity>> = bookRepository.getAllBooks()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

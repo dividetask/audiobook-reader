@@ -40,6 +40,7 @@ import javax.inject.Singleton
 class SeriesRepository @Inject constructor(
     private val seriesDao: SeriesDao,
     private val audibleBookDao: AudibleBookDao,
+    private val libroBookDao: com.dividetask.audiobookreader.data.db.dao.LibroBookDao,
     private val bookRepository: BookRepository,
     private val remoteLibrary: RemoteLibraryManager,
     private val apiClient: AudibleApiClient,
@@ -54,8 +55,9 @@ class SeriesRepository @Inject constructor(
         audibleBookDao.getAll(),
         seriesDao.getAllBooks(),
         seriesDao.getAllLookups(),
-        seriesDao.getAllSeries()
-    ) { library, books, lookups, series -> SeriesIndex(library, books, lookups, series) }
+        seriesDao.getAllSeries(),
+        libroBookDao.getAll()
+    ) { library, books, lookups, series, libro -> SeriesIndex(library, books, lookups, series, libro) }
 
     /** Fetches new series and refreshes stale ones in the background. */
     fun refresh() {
@@ -122,6 +124,10 @@ class SeriesRepository @Inject constructor(
             remoteLibrary.files.value
                 .filter { index.matchLibrary(it.title, it.folder) == null && index.matchSeriesList(it.title, it.folder) == null }
                 .forEach { add(Triple(it.title, it.folder.ifEmpty { null }, 0L)) }
+            // Libro.fm books: found in the Audible catalog to place them in series
+            libroBookDao.getAllOnce()
+                .filter { index.matchLibrary(it.title, it.author) == null && index.matchSeriesList(it.title, it.author) == null }
+                .forEach { add(Triple(it.title, it.author, 0L)) }
         }.distinctBy { (title, author) -> SeriesIndex.lookupKey(title, author) }
 
         for ((title, author, addedAt) in unmatched) {

@@ -105,7 +105,9 @@ fun <T> groupBySeries(
             }
             // Books on the tab that the catalog's list doesn't include
             val extra = remaining.map { (item, ref) -> SeriesMember(ref.asin, titleOf(item), ref.sequence, coverOf(item), item) }
-            val isOwned = { m: SeriesMember<T> -> m.item != null || m.asin?.let { it in index.libraryByAsin } == true }
+            val isOwned = { m: SeriesMember<T> ->
+                m.item != null || m.asin?.let { it in index.libraryByAsin } == true || index.libroMatch(m.title) != null
+            }
             val members = markCovered(dropRepeats(listed + extra, index).sortedWith(
                 compareBy<SeriesMember<T>, Double?>(nullsLast<Double>()) { SeriesIndex.sequenceNumber(it.sequence) }
                     .thenBy(String.CASE_INSENSITIVE_ORDER) { it.title }

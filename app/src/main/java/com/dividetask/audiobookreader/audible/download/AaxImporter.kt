@@ -54,7 +54,8 @@ class AaxImporter @Inject constructor(
     private val requestLog: com.dividetask.audiobookreader.debug.AudibleRequestLog,
     private val metadataExtractor: com.dividetask.audiobookreader.data.metadata.MetadataExtractor,
     private val seriesRepository: com.dividetask.audiobookreader.data.series.SeriesRepository,
-    private val apiClient: com.dividetask.audiobookreader.audible.api.AudibleApiClient
+    private val apiClient: com.dividetask.audiobookreader.audible.api.AudibleApiClient,
+    private val libroApi: com.dividetask.audiobookreader.libro.LibroApi
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -71,6 +72,156 @@ class AaxImporter @Inject constructor(
 
     private val audiobooksDir: File
         get() = File(context.getExternalFilesDir(null), "audiobooks").apply { mkdirs() }
+
+    /** Libro.fm books waiting for or in download (by ISBN), and the one downloading now. */
+    private val _libroQueue = MutableStateFlow<Set<String>>(emptySet())
+    val libroQueue: StateFlow<Set<String>> = _libroQueue.asStateFlow()
+    private val _libroIsbn = MutableStateFlow<String?>(null)
+    val libroIsbn: StateFlow<String?> = _libroIsbn.asStateFlow()
+
+    /** The library file of a Libro.fm book. */
+    fun libroFile(isbn: String) = File(audiobooksDir, "libro_$isbn.m4b")
+
+    fun isLibroDownloaded(isbn: String) = libroFile(isbn).exists()
+
+    /** Queues a Libro.fm book: downloaded, joined into one m4b with chapters, added to the library. */
+    fun downloadLibro(book: com.dividetask.audiobookreader.data.db.entity.LibroBookEntity) {
+        if (book.isbn in _libroQueue.value) return
+        _libroQueue.value = _libroQueue.value + book.isbn
+        scope.launch { importLibro(book) }
+    }
+
+    /** Downloads [book] now (waiting for any other import). True once it's in the library. */
+    suspend fun importLibro(book: com.dividetask.audiobookreader.data.db.entity.LibroBookEntity): Boolean {
+        _libroQueue.value = _libroQueue.value + book.isbn
+        return try {
+            mutex.withLock {
+                _libroIsbn.value = book.isbn
+                runLibro(book)
+            }
+        } finally {
+            _libroIsbn.value = null
+            _libroQueue.value = _libroQueue.value - book.isbn
+        }
+    }
+
+    private suspend fun runLibro(book: com.dividetask.audiobookreader.data.db.entity.LibroBookEntity): Boolean {
+        val title = book.title
+        debugLog.section("Libro.fm download: $title")
+        importDir.listFiles()?.forEach { it.deleteRecursively() }
+        fun step(text: String) {
+            debugLog.log("LIBRO", text)
+            _status.value = AaxImportStatus(title, text)
+        }
+        var lastProgressAt = 0L
+        fun progress(text: String, fraction: Float) {
+            val now = System.currentTimeMillis()
+            if (now - lastProgressAt < 250 && fraction < 1f) return
+            lastProgressAt = now
+            _status.value = AaxImportStatus(title, text, progress = fraction)
+        }
+        fun fail(text: String): Boolean {
+            debugLog.log("LIBRO", "FAILED: $text")
+            _status.value = AaxImportStatus(title, "Download failed: $text", finished = true)
+            importDir.listFiles()?.forEach { it.deleteRecursively() }
+            return false
+        }
+        val dest = libroFile(book.isbn)
+        if (dest.exists()) return fail("\"$title\" is already in your library")
+        try {
+            step("Getting download links")
+            val manifest = libroApi.manifest(book.isbn)
+            if (manifest.parts.isEmpty()) return fail("Libro.fm offered no files for this book")
+            debugLog.log("LIBRO", "${manifest.parts.size} file(s), ${manifest.parts.sumOf { it.sizeBytes } / 1_048_576}MB, ${manifest.tracks.size} tracks")
+
+            // Each part is normally a zip of the book's tracks
+            val audio = mutableListOf<File>()
+            val tracksDir = File(importDir, "tracks").apply { mkdirs() }
+            for ((i, part) in manifest.parts.withIndex()) {
+                val label = if (manifest.parts.size > 1) "Downloading part ${i + 1} of ${manifest.parts.size}" else "Downloading"
+                step(label)
+                val file = File(importDir, "part${i + 1}")
+                libroApi.download(part.url, file) { progress(label, it) }
+                val isZip = file.inputStream().use { val b = ByteArray(2); it.read(b) == 2 && b[0] == 'P'.code.toByte() && b[1] == 'K'.code.toByte() }
+                if (isZip) {
+                    step("Unpacking")
+                    val names = mutableListOf<File>()
+                    java.util.zip.ZipInputStream(file.inputStream().buffered()).use { zip ->
+                        var entry = zip.nextEntry
+                        while (entry != null) {
+                            // Base name only: nothing is written outside the folder
+                            val name = entry.name.substringAfterLast('/').substringAfterLast('\\')
+                            if (!entry.isDirectory && name.substringAfterLast('.', "").lowercase() in AUDIO_EXTENSIONS) {
+                                val out = File(tracksDir, "p%03d_%s".format(i + 1, name))
+                                out.outputStream().use { zip.copyTo(it) }
+                                names += out
+                            }
+                            entry = zip.nextEntry
+                        }
+                    }
+                    file.delete()
+                    // Natural order, so "2-…" comes before "10-…"
+                    audio += names.sortedBy { f -> f.name.lowercase().replace(Regex("\\d+")) { it.value.padStart(10, '0') } }
+                } else {
+                    val ext = java.net.URL(part.url).path.substringAfterLast('.', "mp3").lowercase()
+                        .takeIf { it in AUDIO_EXTENSIONS } ?: "mp3"
+                    audio += File(tracksDir, "p%03d.%s".format(i + 1, ext)).also { file.renameTo(it) }
+                }
+            }
+            if (audio.isEmpty()) return fail("The download held no audio files")
+            debugLog.log("LIBRO", "${audio.size} audio file(s): ${audio.take(3).joinToString { it.name }}${if (audio.size > 3) ", …" else ""}")
+
+            // One chapter per track, named as Libro.fm lists them
+            val chapters = mutableListOf<ChapterEntity>()
+            var offset = 0L
+            val first = probeFormat(audio[0])
+            for ((i, track) in audio.withIndex()) {
+                val format = if (i == 0) first else probeFormat(track)
+                val length = format?.optString("duration")?.toDoubleOrNull()?.times(1000)?.toLong()
+                    ?: manifest.tracks.getOrNull(i)?.lengthSec?.times(1000)?.toLong() ?: 0L
+                val name = manifest.tracks.getOrNull(i)?.title
+                    ?: format?.optJSONObject("tags")?.optString("title")?.takeIf { it.isNotBlank() }
+                    ?: "Chapter ${i + 1}"
+                chapters += ChapterEntity(bookId = 0, title = name, startPositionMs = offset, endPositionMs = offset + length, index = i)
+                offset += length
+            }
+
+            val metadata = File(importDir, "metadata.txt")
+            metadata.writeText(ffMetadata(title, book.author, chapters))
+            val bitrate = (first?.optString("bit_rate")?.toIntOrNull() ?: 64_000).coerceIn(48_000, 128_000)
+            val out = File(importDir, dest.name)
+            val label = "Converting ${audio.size} files"
+            step(label)
+            if (!converter.joinToM4b(audio, metadata, out, bitrate, offset) { progress(label, it) }) {
+                return fail("Converting failed — see the debug log")
+            }
+            tracksDir.deleteRecursively()
+            metadata.delete()
+            if (!out.renameTo(dest)) {
+                out.copyTo(dest, overwrite = true)
+                out.delete()
+            }
+            val id = bookRepository.insertBook(
+                BookEntity(
+                    title = title,
+                    author = book.author,
+                    coverUri = book.coverUrl,
+                    fileUri = Uri.fromFile(dest).toString(),
+                    durationMs = durationMsOf(dest) ?: offset,
+                    chaptersChecked = true
+                ),
+                chapters
+            )
+            debugLog.log("LIBRO", "Added to library: ${dest.name}, ${chapters.size} chapters")
+            removeOtherCopies(id)
+            seriesRepository.refresh()
+            _status.value = AaxImportStatus(title, "Downloaded \"$title\" from Libro.fm", finished = true)
+            return true
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            return fail(e.message ?: e::class.simpleName.orEmpty())
+        }
+    }
 
     // Separate from audiobooks/ so a leftover copy is never mistaken for a partial download
     private val importDir: File

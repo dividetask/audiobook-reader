@@ -294,6 +294,11 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // === Libro.fm ===
+            LibroSettingsSection()
+
+            Spacer(modifier = Modifier.height(8.dp))
+
             // === Server sync (SFTP or S3) ===
             ServerSettingsSection(onWebsiteBackup = onWebsiteBackup)
 

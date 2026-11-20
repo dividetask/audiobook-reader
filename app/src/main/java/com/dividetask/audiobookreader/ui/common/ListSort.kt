@@ -39,6 +39,7 @@ enum class SortOrder(val label: String) {
 enum class SortTab(val options: List<SortOrder>, val default: SortOrder) {
     LIBRARY(listOf(SortOrder.TITLE, SortOrder.RECENTLY_PLAYED, SortOrder.RECENTLY_ADDED), SortOrder.RECENTLY_PLAYED),
     AUDIBLE(listOf(SortOrder.TITLE, SortOrder.RECENTLY_ADDED), SortOrder.RECENTLY_ADDED),
+    LIBRO(listOf(SortOrder.TITLE, SortOrder.RECENTLY_ADDED), SortOrder.RECENTLY_ADDED),
     SERVER(listOf(SortOrder.TITLE, SortOrder.RECENTLY_ADDED), SortOrder.TITLE),
     ALL(listOf(SortOrder.TITLE, SortOrder.RECENTLY_PLAYED), SortOrder.TITLE)
 }

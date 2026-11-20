@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -84,6 +85,8 @@ class BackupEngine @Inject constructor(
     private val seriesRepository: SeriesRepository,
     private val bookRepository: BookRepository,
     private val websiteBackup: WebsiteBackupNotifier,
+    private val libroBookDao: com.dividetask.audiobookreader.data.db.dao.LibroBookDao,
+    private val importer: dagger.Lazy<com.dividetask.audiobookreader.audible.download.AaxImporter>,
     private val debugLog: AppDebugLog
 ) {
     private val mutex = Mutex()
@@ -295,10 +298,18 @@ class BackupEngine @Inject constructor(
     private suspend fun runAudibleLocked(maxBooks: Int, force: Boolean, onlyAsin: String? = null): BackupOutcome {
         debugLog.section("Server Backup (Audible)")
         onlyAsin?.let { debugLog.log("BACKUP", "Requested from the Server tab: $it") }
+        // A Libro.fm book (tapped in the Server tab): no Audible involved
+        if (onlyAsin?.startsWith(LIBRO_PREFIX) == true) {
+            if (!settings.isConfigured) return finish(BackupOutcome.Failed("Server not set up", retry = false))
+            return libroPass(onlyAsin.removePrefix(LIBRO_PREFIX))
+                ?: finish(BackupOutcome.AllDone, "already on the server", prefix = "Libro.fm")
+        }
         if (!settings.isConfigured) return finish(BackupOutcome.Failed("Server not set up", retry = false))
         if (!tokenStore.isAuthenticated) return finish(BackupOutcome.Failed("Not signed in to Audible", retry = false))
         if (!force && apiClient.isThrottled) {
             websiteBackup.promptThrottled(null)
+            // Libro.fm has no such limit: back up one of its books instead
+            if (onlyAsin == null) libroPass(null)?.let { return it }
             return finish(BackupOutcome.Failed(apiClient.throttleMessage(), retry = false), prefix = "Audible")
         }
 
@@ -334,7 +345,11 @@ class BackupEngine @Inject constructor(
                 if (onlyAsin != null) it.asin == onlyAsin else (failures[it.asin] ?: 0) < MAX_FAILURES
         }
         debugLog.log("BACKUP", "${library.size} Audible books, ${onPhone.size} on phone, ${pending.size} to download and back up")
-        if (pending.isEmpty()) return finish(BackupOutcome.AllDone, "nothing left to download", prefix = "Audible")
+        if (pending.isEmpty()) {
+            // Audible is done: Libro.fm books next
+            if (onlyAsin == null) libroPass(null)?.let { return it }
+            return finish(BackupOutcome.AllDone, "nothing left to download", prefix = "Audible")
+        }
 
         var done = 0
         var failed = 0
@@ -375,6 +390,71 @@ class BackupEngine @Inject constructor(
     }
 
     private fun localKey(book: BookEntity) = "book:${book.id}"
+
+    private fun libroBase(book: com.dividetask.audiobookreader.data.db.entity.LibroBookEntity) =
+        "${safeName(book.author)}/${safeName(book.title)}"
+
+    /**
+     * Backs up one Libro.fm book that's neither on the phone nor on the server ([onlyIsbn], or
+     * the next one): downloaded, joined, uploaded, then the phone copy is deleted. Null when
+     * there's none to do.
+     */
+    private suspend fun libroPass(onlyIsbn: String?): BackupOutcome? {
+        val libro = libroBookDao.getAllOnce()
+        if (libro.isEmpty()) return null
+        val imp = importer.get()
+        val onServer = try {
+            serverPaths()
+        } catch (e: ServerException) {
+            return finish(BackupOutcome.Failed(e.message ?: "Server error", retry = !e.settingsProblem), prefix = "Libro.fm")
+        }
+        val failures = settings.failures
+        val pending = libro.filter {
+            !imp.isLibroDownloaded(it.isbn) && libroBase(it).lowercase() !in onServer &&
+                if (onlyIsbn != null) it.isbn == onlyIsbn else (failures[LIBRO_PREFIX + it.isbn] ?: 0) < MAX_FAILURES
+        }
+        if (pending.isEmpty()) return null
+        val book = pending.first()
+        debugLog.log("BACKUP", "${libro.size} Libro.fm books, ${pending.size} to download and back up: ${book.title}")
+        val key = LIBRO_PREFIX + book.isbn
+        try {
+            setStatus(BackupStatus(BackupPhase.DOWNLOADING, book.title, remaining = pending.size))
+            // Mirror the download's progress in the backup status
+            val ok = kotlinx.coroutines.coroutineScope {
+                val mirror = launch {
+                    imp.status.collect { s ->
+                        if (s != null && !s.finished && s.title == book.title) {
+                            val phase = if (s.step.startsWith("Converting")) BackupPhase.CONVERTING else BackupPhase.DOWNLOADING
+                            setStatus(BackupStatus(phase, book.title, ((s.progress ?: 0f) * 1000).toLong(),
+                                if (s.progress != null) 1000 else 0, pending.size))
+                        }
+                    }
+                }
+                try { imp.importLibro(book) } finally { mirror.cancel() }
+            }
+            if (!ok) throw IOException(imp.status.value?.step ?: "Libro.fm download failed")
+            val file = imp.libroFile(book.isbn)
+            upload(file, libroBase(book), book.title, pending.size)
+            bookRepository.getBookByFileUri(Uri.fromFile(file).toString())?.let { bookRepository.deleteBook(it.id) }
+            if (file.delete()) debugLog.log("BACKUP", "Removed phone copy after upload: ${file.name}")
+            settings.failures = settings.failures - key
+            debugLog.log("BACKUP", "Backed up (Libro.fm): ${book.title}")
+            return finish(if (pending.size > 1) BackupOutcome.MoreRemaining else BackupOutcome.AllDone,
+                "backed up ${book.title}" + if (pending.size > 1) ", ${pending.size - 1} remaining" else "", prefix = "Libro.fm")
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            if (e is ServerException && e.settingsProblem) {
+                return finish(BackupOutcome.Failed(e.message ?: "Server error", retry = false), prefix = "Libro.fm")
+            }
+            if (isConnectionProblem(e)) {
+                return finish(BackupOutcome.Failed("connection lost (${e.message})", retry = true), prefix = "Libro.fm")
+            }
+            val count = (settings.failures[key] ?: 0) + 1
+            settings.failures = settings.failures + (key to count)
+            debugLog.log("BACKUP", "Failed (${count}/$MAX_FAILURES): ${book.title} — ${e::class.simpleName}: ${e.message}")
+            return finish(BackupOutcome.Failed("${book.title}: ${e.message}", retry = e is IOException), prefix = "Libro.fm")
+        }
+    }
 
     private suspend fun removePhoneCopy(copy: LocalCopy) {
         bookRepository.deleteBook(copy.book.id)
@@ -568,6 +648,8 @@ class BackupEngine @Inject constructor(
         const val CHANNEL = "backup"
         const val NOTIFICATION_ID = 0x5F7B
         const val MAX_FAILURES = 5
+        /** Marks a Libro.fm ISBN where an Audible ASIN is expected (Server tab requests, failure counts). */
+        const val LIBRO_PREFIX = "libro:"
     }
 }
 

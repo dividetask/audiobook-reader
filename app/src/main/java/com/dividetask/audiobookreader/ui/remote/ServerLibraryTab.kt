@@ -104,6 +104,7 @@ fun ServerLibraryTab(
     expandedSeries: Set<String>,
     onToggleSeries: (String) -> Unit,
     isAudibleDownloaded: (String) -> Boolean,
+    isLibroDownloaded: (String) -> Boolean = { false },
     onAudibleDownload: (AudibleBookEntity) -> Unit,
     sortOrder: SortOrder,
     onSortChange: (SortOrder) -> Unit,
@@ -178,13 +179,33 @@ fun ServerLibraryTab(
                 backup.phase in listOf(BackupPhase.DOWNLOADING, BackupPhase.CONVERTING, BackupPhase.UPLOADING)
             val progress = if (busy && backup.total > 0) backup.bytes.toFloat() / backup.total else null
             val percent = progress?.let { " — ${(it * 100).toInt()}%" } ?: ""
+            val libro = if (owned == null) seriesIndex.libroMatch(title) else null
+            val libroKey = libro?.let { BackupEngine.LIBRO_PREFIX + it.isbn }
             when {
-                owned == null -> SeriesPlaceholderItem(member, "Not purchased")
+                owned == null && libro == null -> SeriesPlaceholderItem(member, "Not purchased")
+                // Bought on Libro.fm: on the phone, the phone-copies backup uploads it; else back it up from Libro.fm
+                owned == null && libro != null && !busy -> when {
+                    isLibroDownloaded(libro.isbn) ->
+                        if (queue.any { it.first.equals(title, ignoreCase = true) }) {
+                            SeriesPlaceholderItem(member, prefix + "Waiting to upload · on device") { WaitingIcon("Waiting to upload") }
+                        } else {
+                            SeriesPlaceholderItem(member, prefix + "Not on server · on device")
+                        }
+                    libroKey in requested -> SeriesPlaceholderItem(member, prefix + "Waiting to back up from Libro.fm") {
+                        WaitingIcon("Waiting to back up")
+                    }
+                    else -> SeriesPlaceholderItem(member, prefix + "Not on server · owned on Libro.fm") {
+                        IconButton(onClick = { viewModel.backUp(libroKey!!) }) {
+                            Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Back up to server", modifier = Modifier.size(32.dp))
+                        }
+                    }
+                }
                 busy -> SeriesPlaceholderItem(member, prefix + when (backup.phase) {
-                    BackupPhase.DOWNLOADING -> "Downloading from Audible for the server$percent"
+                    BackupPhase.DOWNLOADING -> (if (owned == null) "Downloading from Libro.fm for the server" else "Downloading from Audible for the server") + percent
                     BackupPhase.CONVERTING -> "Converting for the server"
                     else -> "Uploading to server$percent"
                 }) { ProgressIcon(progress) }
+                owned == null -> SeriesPlaceholderItem(member, prefix + "Not on server")
                 // On the phone, not on the server: the phone-copies backup uploads it
                 isAudibleDownloaded(owned.asin) ->
                     if (queue.any { it.first.equals(title, ignoreCase = true) }) {
@@ -267,7 +288,7 @@ private fun uploadRows(
             "Uploading · ${mb(backup.bytes)} of ${mb(backup.total)} MB",
             if (backup.total > 0) backup.bytes.toFloat() / backup.total else -1f))
         BackupPhase.DOWNLOADING -> rows.add(UploadRow("current", backup.title, "",
-            "Downloading from Audible, then uploading" +
+            "Downloading, then uploading" +
                 if (backup.total > 0) " · ${mb(backup.bytes)} of ${mb(backup.total)} MB" else "",
             if (backup.total > 0) backup.bytes.toFloat() / backup.total else -1f))
         BackupPhase.CONVERTING -> rows.add(UploadRow("current", backup.title, "", "Converting, then uploading", -1f))
