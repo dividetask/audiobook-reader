@@ -330,6 +330,9 @@ class S3Connection internal constructor(
             conn.requestMethod = method
             conn.connectTimeout = 15_000
             conn.readTimeout = 60_000
+            // A fresh connection for every request: a pooled one Backblaze already closed fails an upload
+            // with "Broken pipe" (only bodiless requests are retried on a new connection automatically)
+            conn.setRequestProperty("Connection", "close")
             conn.setRequestProperty("x-amz-date", amzDate)
             conn.setRequestProperty("x-amz-content-sha256", payloadHash)
             conn.setRequestProperty("Authorization",
@@ -344,7 +347,28 @@ class S3Connection internal constructor(
                 }
                 conn.doOutput = true
                 conn.setFixedLengthStreamingMode(bytes.size)
-                conn.outputStream.use { it.write(bytes) }
+                var sent = 0
+                try {
+                    conn.outputStream.use { out ->
+                        while (sent < bytes.size) {
+                            val n = minOf(65536, bytes.size - sent)
+                            out.write(bytes, sent, n)
+                            sent += n
+                        }
+                    }
+                } catch (e: java.io.IOException) {
+                    // The server may have answered with an error and closed the connection: read it if it did
+                    val what = "$method ${url.path}${url.query?.let { "?${it.take(120)}" } ?: ""}"
+                    val error = try { conn.errorStream?.use { String(it.readBytes()) } } catch (_: Exception) { null }
+                    val code = try { conn.responseCode } catch (_: Exception) { -1 }
+                    log("$what failed after sending $sent of ${bytes.size} bytes: ${e::class.simpleName}: ${e.message}" +
+                        (if (code > 0) " — server answered HTTP $code" else "") +
+                        (error?.takeIf { it.isNotBlank() }?.let { " ${it.replace(Regex("\\s+"), " ").take(400)}" } ?: ""))
+                    if (code > 0 && code !in 200..299 && error != null) {
+                        throw ServerException(errorMessage(code, error), settingsProblem = tag(error, "Code") in SETTINGS_ERRORS)
+                    }
+                    throw e
+                }
             }
             val code = conn.responseCode
             if (code !in 200..299) {
