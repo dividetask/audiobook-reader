@@ -41,16 +41,16 @@ All code optimizations and obfuscation are disabled for debuggable builds.
 > Task :app:kspDebugKotlin
 
 > Task :app:compileDebugKotlin
-w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/common/SeriesList.kt:199:40 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
-w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/main/MainScreen.kt:151:29 Condition is always 'false'.
+w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/common/SeriesList.kt:201:40 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
+w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/main/MainScreen.kt:154:29 Condition is always 'false'.
 
 > Task :app:compileDebugJavaWithJavac
-> Task :app:hiltAggregateDepsDebug UP-TO-DATE
+> Task :app:hiltAggregateDepsDebug
 > Task :app:hiltJavaCompileDebug
-> Task :app:processDebugJavaRes UP-TO-DATE
-> Task :app:mergeDebugJavaResource UP-TO-DATE
+> Task :app:processDebugJavaRes
 > Task :app:transformDebugClassesWithAsm
-> Task :app:mergeDebugGeneratedProguardFiles UP-TO-DATE
+> Task :app:mergeDebugGeneratedProguardFiles
+> Task :app:mergeDebugJavaResource
 > Task :app:minifyDebugWithR8
 > Task :app:shrinkDebugRes
 > Task :app:convertShrunkResourcesToBinaryDebug
@@ -58,5 +58,5 @@ w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 50s
-41 actionable tasks: 17 executed, 24 up-to-date
+BUILD SUCCESSFUL in 56s
+41 actionable tasks: 21 executed, 20 up-to-date
