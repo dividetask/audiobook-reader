@@ -45,12 +45,12 @@ w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask
 w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask/audiobookreader/ui/main/MainScreen.kt:154:29 Condition is always 'false'.
 
 > Task :app:compileDebugJavaWithJavac
-> Task :app:hiltAggregateDepsDebug
+> Task :app:hiltAggregateDepsDebug UP-TO-DATE
 > Task :app:hiltJavaCompileDebug
-> Task :app:processDebugJavaRes
+> Task :app:processDebugJavaRes UP-TO-DATE
 > Task :app:transformDebugClassesWithAsm
-> Task :app:mergeDebugGeneratedProguardFiles
-> Task :app:mergeDebugJavaResource
+> Task :app:mergeDebugJavaResource UP-TO-DATE
+> Task :app:mergeDebugGeneratedProguardFiles UP-TO-DATE
 > Task :app:minifyDebugWithR8
 > Task :app:shrinkDebugRes
 > Task :app:convertShrunkResourcesToBinaryDebug
@@ -58,5 +58,5 @@ w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 56s
-41 actionable tasks: 21 executed, 20 up-to-date
+BUILD SUCCESSFUL in 52s
+41 actionable tasks: 17 executed, 24 up-to-date
