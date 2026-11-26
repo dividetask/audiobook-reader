@@ -179,7 +179,21 @@ class S3Connection internal constructor(
                     val buffer = ByteArray(length)
                     raf.seek(offset)
                     raf.readFully(buffer)
-                    val response = request("PUT", key, sortedMapOf("partNumber" to "$n", "uploadId" to id), buffer)
+                    val response = try {
+                        request("PUT", key, sortedMapOf("partNumber" to "$n", "uploadId" to id), buffer)
+                    } catch (e: java.io.IOException) {
+                        if (e is ServerException) throw e
+                        // Backblaze cuts the connection mid-part, without an answer, once a daily cap is
+                        // reached; a dropped network fails the same way, so try the part once more first
+                        Thread.sleep(5_000)
+                        try {
+                            request("PUT", key, sortedMapOf("partNumber" to "$n", "uploadId" to id), buffer)
+                        } catch (again: java.io.IOException) {
+                            if (again is ServerException) throw again
+                            throw ServerException("Storage stopped accepting uploads (daily limit?) — ${again.message}",
+                                again, dailyLimit = true)
+                        }
+                    }
                     done[n] = response.header("ETag") ?: throw ServerException("Storage gave no ETag for part $n")
                 }
                 if (!progress(offset + length, size)) throw CancellationException("Upload stopped")
@@ -365,7 +379,8 @@ class S3Connection internal constructor(
                         (if (code > 0) " — server answered HTTP $code" else "") +
                         (error?.takeIf { it.isNotBlank() }?.let { " ${it.replace(Regex("\\s+"), " ").take(400)}" } ?: ""))
                     if (code > 0 && code !in 200..299 && error != null) {
-                        throw ServerException(errorMessage(code, error), settingsProblem = tag(error, "Code") in SETTINGS_ERRORS)
+                        throw ServerException(errorMessage(code, error), settingsProblem = tag(error, "Code") in SETTINGS_ERRORS,
+                            dailyLimit = isCap(error))
                     }
                     throw e
                 }
@@ -382,7 +397,8 @@ class S3Connection internal constructor(
                     tag(error, "StringToSign")?.let { log("Server string to sign: ${oneLine(it)}") }
                     tag(error, "Message")?.let { log("Server message: $it") }
                 }
-                throw ServerException(errorMessage(code, error), settingsProblem = tag(error, "Code") in SETTINGS_ERRORS)
+                throw ServerException(errorMessage(code, error), settingsProblem = tag(error, "Code") in SETTINGS_ERRORS,
+                    dailyLimit = isCap(error))
             }
             if (sink != null) {
                 conn.inputStream.use { sink(it, code) }
@@ -409,6 +425,12 @@ class S3Connection internal constructor(
     }
 
     companion object {
+        /** Backblaze's cap errors ("transaction cap exceeded", "storage cap exceeded"…). */
+        private fun isCap(xml: String): Boolean {
+            val text = (tag(xml, "Code").orEmpty() + " " + tag(xml, "Message").orEmpty()).lowercase()
+            return "cap" in text && ("exceed" in text || "reached" in text)
+        }
+
         /** S3 error codes that mean the bucket, key or region in Settings is wrong. */
         private val SETTINGS_ERRORS = setOf(
             "InvalidAccessKeyId", "SignatureDoesNotMatch", "NoSuchBucket", "AccessDenied", "AuthorizationHeaderMalformed"

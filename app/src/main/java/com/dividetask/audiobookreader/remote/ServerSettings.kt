@@ -156,6 +156,19 @@ class ServerSettings @Inject constructor(
         get() = str("website_backup_asins", "").split("\n").filter { it.isNotBlank() }.toSet()
         set(value) = putStr("website_backup_asins", value.joinToString("\n"))
 
+    /** The storage refused uploads for today: none are tried before this time (ms). */
+    var uploadsPausedUntil: Long
+        get() = try { prefs.getLong("uploads_paused_until", 0L) } catch (_: Exception) { 0L }
+        set(value) { try { prefs.edit().putLong("uploads_paused_until", value).apply() } catch (_: Exception) {} }
+
+    val uploadsPaused: Boolean get() = System.currentTimeMillis() < uploadsPausedUntil
+
+    /** True when [rel] (relative to the folder) has an S3 upload this phone can continue. */
+    fun hasUnfinishedUpload(rel: String): Boolean {
+        val prefix = folder.trim().trim('/')
+        return s3UploadId(if (prefix.isEmpty()) rel else "$prefix/$rel") != null
+    }
+
     /** Upload IDs of unfinished uploads the user chose to keep, so they aren't offered again. */
     var keptUploads: Set<String>
         get() = str("kept_uploads", "").split("\n").filter { it.isNotBlank() }.toSet()

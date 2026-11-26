@@ -25,7 +25,14 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /** How a website download ended. [refused] = the Audible website turned the download away. */
-data class WebsiteImportResult(val asin: String, val ok: Boolean, val error: String? = null, val refused: Boolean = false)
+data class WebsiteImportResult(
+    val asin: String,
+    val ok: Boolean,
+    val error: String? = null,
+    val refused: Boolean = false,
+    /** The website session ended (e.g. the link expired and no new one came): signing in again continues it. */
+    val needsSignIn: Boolean = false
+)
 
 data class AaxImportStatus(
     val title: String,
@@ -55,7 +62,8 @@ class AaxImporter @Inject constructor(
     private val metadataExtractor: com.dividetask.audiobookreader.data.metadata.MetadataExtractor,
     private val seriesRepository: com.dividetask.audiobookreader.data.series.SeriesRepository,
     private val apiClient: com.dividetask.audiobookreader.audible.api.AudibleApiClient,
-    private val libroApi: com.dividetask.audiobookreader.libro.LibroApi
+    private val libroApi: com.dividetask.audiobookreader.libro.LibroApi,
+    private val websiteNotifier: com.dividetask.audiobookreader.remote.WebsiteBackupNotifier
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -410,29 +418,50 @@ class AaxImporter @Inject constructor(
      * using the website session the in-app browser signed into, then imports it. [urls] are
      * the book's download links in order: one, or one per part for books Audible splits.
      */
-    fun importFromWebsite(urls: List<String>, userAgent: String?, asin: String, title: String) {
+    fun importFromWebsite(urls: List<String>, userAgent: String?, asin: String, title: String, forBackup: Boolean = false) {
         scope.launch {
             mutex.withLock {
                 _websiteAsin.value = asin
                 var fetchError: String? = null
+                // A download of this book that stopped earlier: its parts continue where they ended
+                val marker = File(importDir, WEBSITE_MARKER)
+                val resume = marker.exists() && marker.readText() == asin
                 try {
-                    val ok = runImport("$title.aax", knownAsin = asin) { dir, step, progress ->
+                    val ok = runImport("$title.aax", knownAsin = asin, keepFiles = true, clear = !resume) { dir, step, progress ->
+                        marker.writeText(asin)
                         val files = mutableListOf<File>()
                         for ((i, url) in urls.withIndex()) {
                             val label = if (urls.size > 1) "Downloading part ${i + 1} of ${urls.size}" else "Downloading from Audible website"
                             step(label)
                             val part = File(dir, "part${i + 1}.aax")
-                            downloadWaitingForConnection(url, userAgent, part, label, step) { progress(label, it) }
-                                ?.let { fetchError = it; return@runImport Fetched(error = it) }
+                            val error = if (resume && part.exists() && part.length() > 0) {
+                                debugLog.log("IMPORT", "Continuing part ${i + 1} from ${part.length() / 1_048_576}MB")
+                                val link = freshLink(url, userAgent)
+                                if (link == null) "Signed out of the Audible website — sign in again to continue"
+                                else resumeDownload(link, userAgent, part, 0, java.io.IOException("stopped earlier"),
+                                    { progress(label, it) }) { freshLink(url, userAgent) }
+                            } else {
+                                downloadWaitingForConnection(url, userAgent, part, label, step) { progress(label, it) }
+                            }
+                            error?.let { fetchError = it; return@runImport Fetched(error = it) }
                             files += part
                         }
                         Fetched(files)
                     }
+                    if (ok) marker.delete()
                     val error = fetchError
-                    // No connection at all isn't the website refusing
+                    val needsSignIn = error != null && (error.contains("sign in", ignoreCase = true) ||
+                        Regex("HTTP 40[13]").containsMatchIn(error))
+                    if (needsSignIn) {
+                        debugLog.log("IMPORT", "Website download of \"$title\" stopped and needs a new sign-in: $error")
+                        // The website backup screen asks for itself
+                        if (!forBackup) websiteNotifier.promptSignIn(asin, title)
+                    }
+                    // No connection at all isn't the website refusing; nor is an ended session
                     _websiteResults.tryEmit(WebsiteImportResult(asin, ok,
                         error = if (ok) null else error ?: _status.value?.step,
-                        refused = error != null && !error.startsWith("Can't reach")))
+                        refused = error != null && !needsSignIn && !error.startsWith("Can't reach"),
+                        needsSignIn = needsSignIn))
                 } finally {
                     _websiteAsin.value = null
                 }
@@ -615,11 +644,14 @@ class AaxImporter @Inject constructor(
     private suspend fun runImport(
         displayName: String,
         knownAsin: String?,
+        /** Leave downloaded files when the download fails, so it can continue next time. */
+        keepFiles: Boolean = false,
+        clear: Boolean = true,
         fetch: suspend (File, (String) -> Unit, (String, Float) -> Unit) -> Fetched
     ): Boolean {
         debugLog.section("Import AAX: $displayName")
         var title = displayName.substringBeforeLast('.')
-        importDir.listFiles()?.forEach { it.delete() }
+        if (clear) importDir.listFiles()?.forEach { it.delete() }
 
         fun step(text: String) {
             debugLog.log("IMPORT", text)
@@ -642,7 +674,13 @@ class AaxImporter @Inject constructor(
 
         try {
             val fetched = fetch(importDir, ::step, ::progress)
-            fetched.error?.let { return fail(it) }
+            fetched.error?.let { error ->
+                if (!keepFiles) return fail(error)
+                // Keep what was downloaded: the next try continues from it
+                debugLog.log("IMPORT", "FAILED: $error (download kept to continue later)")
+                _status.value = AaxImportStatus(title, "Download stopped: $error", finished = true)
+                return false
+            }
             val parts = fetched.files.ifEmpty { return fail("Nothing was downloaded") }
             debugLog.log("IMPORT", "Got ${parts.size} file(s), ${parts.sumOf { it.length() } / 1_048_576}MB")
 
@@ -953,6 +991,11 @@ class AaxImporter @Inject constructor(
                     System.currentTimeMillis() - started, connection.contentLengthLong, "resume from $have")
                 // 206: the rest of the file; 200: the server ignored the range, so start over
                 val append = code == 206
+                // Nothing left to fetch: the part was already complete
+                if (code == 416) {
+                    debugLog.log("IMPORT", "Part already complete: ${have / 1_048_576}MB")
+                    return null
+                }
                 // The file link is signed and expires (about an hour): get a new one once and carry on
                 if ((code == 401 || code == 403 || code == 410) && !refreshed) {
                     refreshed = true
@@ -1004,7 +1047,8 @@ class AaxImporter @Inject constructor(
                 when (code) {
                     in 300..399 -> current = java.net.URL(java.net.URL(current),
                         connection.getHeaderField("Location") ?: return null).toString()
-                    200, 206 -> return current.takeIf { it != pageUrl }
+                    // A sign-in page instead of the file: the session has ended
+                    200, 206 -> return current.takeIf { it != pageUrl && connection.contentType?.startsWith("text/") != true }
                     else -> return null
                 }
             } catch (e: java.io.IOException) {
@@ -1085,6 +1129,8 @@ class AaxImporter @Inject constructor(
 
     private companion object {
         val AUDIO_EXTENSIONS = setOf("mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "wma")
+        /** In the import folder: the ASIN whose website download is there to continue. */
+        private const val WEBSITE_MARKER = "website.asin"
         val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png")
         // Never cut more than this from either end of a part, whatever Audible's data says
         const val MAX_CUT_MS = 3 * 60_000L

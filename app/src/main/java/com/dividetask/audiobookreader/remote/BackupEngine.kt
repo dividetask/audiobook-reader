@@ -234,6 +234,7 @@ class BackupEngine @Inject constructor(
     private suspend fun runLocalLocked(): BackupOutcome {
         debugLog.section("Server Backup (phone copies)")
         if (!settings.isConfigured) return finish(BackupOutcome.Failed("Server not set up", retry = false))
+        pausedOutcome("Phone copies")?.let { return it }
         setStatus(BackupStatus(BackupPhase.CHECKING, "Checking phone copies"))
 
         val audibleByAsin = audibleBookDao.getAllOnce().associateBy { it.asin }
@@ -251,6 +252,9 @@ class BackupEngine @Inject constructor(
             val pending = localCopies(audibleByAsin).filter {
                 it.book.id !in tried && it.remoteBase.lowercase() !in onServer &&
                     (failures[localKey(it.book)] ?: 0) < MAX_FAILURES
+            }.sortedByDescending {
+                // Finish an upload already started before starting another
+                settings.hasUnfinishedUpload("${it.remoteBase}.${it.file.extension}")
             }
             if (pending.isEmpty()) break
             _queue.value = pending.map { it.book.title to "${it.remoteBase}.${it.file.extension}" }
@@ -272,6 +276,7 @@ class BackupEngine @Inject constructor(
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
+                    if (e is ServerException && e.dailyLimit) return dailyLimitReached(e, copy.book.title, "Phone copies")
                     // Wrong settings aren't the book's fault: don't count it towards skipping the book
                     if (e is ServerException && e.settingsProblem) {
                         return finish(BackupOutcome.Failed(e.message ?: "Server error", retry = false), prefix = "Phone copies")
@@ -306,6 +311,8 @@ class BackupEngine @Inject constructor(
         }
         if (!settings.isConfigured) return finish(BackupOutcome.Failed("Server not set up", retry = false))
         if (!tokenStore.isAuthenticated) return finish(BackupOutcome.Failed("Not signed in to Audible", retry = false))
+        // No new book while uploads wait for tomorrow: the one waiting is finished first
+        pausedOutcome("Audible")?.let { return it }
         if (!force && apiClient.isThrottled) {
             websiteBackup.promptThrottled(null)
             // Libro.fm has no such limit: back up one of its books instead
@@ -343,6 +350,9 @@ class BackupEngine @Inject constructor(
             it.asin !in onPhone && remoteBase(it).lowercase() !in onServer &&
                 // A book the user asked for is tried even after earlier failures
                 if (onlyAsin != null) it.asin == onlyAsin else (failures[it.asin] ?: 0) < MAX_FAILURES
+        }.sortedByDescending { book ->
+            // A book already downloaded or converted by an earlier run is finished first
+            workDir.listFiles()?.any { it.nameWithoutExtension == book.asin } == true
         }
         debugLog.log("BACKUP", "${library.size} Audible books, ${onPhone.size} on phone, ${pending.size} to download and back up")
         if (pending.isEmpty()) {
@@ -364,6 +374,7 @@ class BackupEngine @Inject constructor(
                 debugLog.log("BACKUP", "Backed up: ${book.title}")
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                if (e is ServerException && e.dailyLimit) return dailyLimitReached(e, book.title, "Audible")
                 if (e is AudibleThrottledException) {
                     websiteBackup.promptThrottled(book.title)
                     return finish(BackupOutcome.Failed(e.message ?: "Throttled by Audible", retry = true), prefix = "Audible")
@@ -391,6 +402,32 @@ class BackupEngine @Inject constructor(
 
     private fun localKey(book: BookEntity) = "book:${book.id}"
 
+    private fun pausedText() = java.text.SimpleDateFormat("EEE h:mm a", java.util.Locale.getDefault())
+        .format(java.util.Date(settings.uploadsPausedUntil))
+
+    /** While uploads wait for tomorrow, nothing new is started. */
+    private fun pausedOutcome(prefix: String): BackupOutcome? =
+        if (settings.uploadsPaused) finish(BackupOutcome.Failed("server upload limit reached — continuing ${pausedText()}",
+            retry = false), prefix = prefix) else null
+
+    /**
+     * The storage stopped taking uploads (Backblaze daily caps reset at midnight GMT): pause
+     * uploads until just after then. The interrupted upload is continued first next time.
+     */
+    private fun dailyLimitReached(e: ServerException, title: String, prefix: String): BackupOutcome {
+        val utc = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply {
+            add(java.util.Calendar.DAY_OF_YEAR, 1)
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 5)
+            set(java.util.Calendar.SECOND, 0)
+        }
+        settings.uploadsPausedUntil = utc.timeInMillis
+        debugLog.log("BACKUP", "Server stopped accepting uploads while uploading $title (${e.message}) — " +
+            "pausing uploads until ${pausedText()}")
+        return finish(BackupOutcome.Failed("server upload limit reached on \"$title\" — continuing ${pausedText()}",
+            retry = false), prefix = prefix)
+    }
+
     private fun libroBase(book: com.dividetask.audiobookreader.data.db.entity.LibroBookEntity) =
         "${safeName(book.author)}/${safeName(book.title)}"
 
@@ -402,6 +439,7 @@ class BackupEngine @Inject constructor(
     private suspend fun libroPass(onlyIsbn: String?): BackupOutcome? {
         val libro = libroBookDao.getAllOnce()
         if (libro.isEmpty()) return null
+        pausedOutcome("Libro.fm")?.let { return it }
         val imp = importer.get()
         val onServer = try {
             serverPaths()
@@ -443,6 +481,7 @@ class BackupEngine @Inject constructor(
                 "backed up ${book.title}" + if (pending.size > 1) ", ${pending.size - 1} remaining" else "", prefix = "Libro.fm")
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            if (e is ServerException && e.dailyLimit) return dailyLimitReached(e, book.title, "Libro.fm")
             if (e is ServerException && e.settingsProblem) {
                 return finish(BackupOutcome.Failed(e.message ?: "Server error", retry = false), prefix = "Libro.fm")
             }

@@ -68,7 +68,21 @@ class WebsiteBackupNotifier @Inject constructor(
 
     fun clearPrompt() = notificationManager.cancel(PROMPT_ID)
 
-    private fun post(id: Int, title: String, text: String, openOnTap: Boolean = true) {
+    /** A website download the user started stopped and needs a new sign-in: tapping reopens it. */
+    fun promptSignIn(asin: String, title: String) {
+        debugLog.log("WEBBACKUP", "Asking to sign in again to continue \"$title\"")
+        post(SIGN_IN_ID, "Download of \"$title\" stopped",
+            "Tap to sign in to the Audible website again — the download continues where it stopped.", openAsin = asin)
+    }
+
+    /** The website backup stopped because the website session ended. */
+    fun promptBackupSignIn(title: String) {
+        debugLog.log("WEBBACKUP", "Website backup stopped on \"$title\" — asking to sign in again")
+        post(PROMPT_ID, "Website backup stopped",
+            "Tap to sign in to the Audible website again — \"$title\" continues where it stopped.")
+    }
+
+    private fun post(id: Int, title: String, text: String, openOnTap: Boolean = true, openAsin: String? = null) {
         val builder = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle(title)
@@ -77,7 +91,7 @@ class WebsiteBackupNotifier @Inject constructor(
             .setAutoCancel(true)
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            if (openOnTap) putExtra(EXTRA_OPEN, true)
+            if (openAsin != null) putExtra(EXTRA_ASIN, openAsin) else if (openOnTap) putExtra(EXTRA_OPEN, true)
         }
         builder.setContentIntent(PendingIntent.getActivity(context, id, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
@@ -91,6 +105,9 @@ class WebsiteBackupNotifier @Inject constructor(
     companion object {
         /** Intent extra: open the website backup screen. */
         const val EXTRA_OPEN = "open_website_backup"
+        /** Intent extra: open the website download of this ASIN. */
+        const val EXTRA_ASIN = "open_website_download"
+        private const val SIGN_IN_ID = 4203
         private const val CHANNEL = "website_backup"
         private const val PROMPT_ID = 4201
         private const val BLOCKED_ID = 4202

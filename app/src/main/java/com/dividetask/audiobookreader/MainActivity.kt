@@ -20,6 +20,8 @@ class MainActivity : ComponentActivity() {
 
     /** Set when the website-backup notification was tapped. */
     private val openWebsiteBackup = mutableStateOf(false)
+    /** Set when a "download stopped — sign in again" notification was tapped. */
+    private val openWebsiteDownload = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -30,7 +32,9 @@ class MainActivity : ComponentActivity() {
                 AppNavigation(
                     debugLog = debugLog,
                     openWebsiteBackup = openWebsiteBackup.value,
-                    onWebsiteBackupOpened = { openWebsiteBackup.value = false }
+                    onWebsiteBackupOpened = { openWebsiteBackup.value = false },
+                    openWebsiteDownload = openWebsiteDownload.value,
+                    onWebsiteDownloadOpened = { openWebsiteDownload.value = null }
                 )
             }
         }
@@ -42,6 +46,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
+        intent?.getStringExtra(WebsiteBackupNotifier.EXTRA_ASIN)?.let {
+            intent.removeExtra(WebsiteBackupNotifier.EXTRA_ASIN)
+            openWebsiteDownload.value = it
+        }
         if (intent?.getBooleanExtra(WebsiteBackupNotifier.EXTRA_OPEN, false) == true) {
             intent.removeExtra(WebsiteBackupNotifier.EXTRA_OPEN)
             openWebsiteBackup.value = true

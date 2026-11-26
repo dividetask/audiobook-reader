@@ -99,6 +99,10 @@ class WebsiteDownloadViewModel @Inject constructor(
     }
 
     private suspend fun pickNext() {
+        if (serverSettings.uploadsPaused) {
+            finishChain("The server stopped accepting uploads for today — continuing tomorrow")
+            return
+        }
         if (notifier.isBlocked) {
             finishChain("The Audible website refused a download — paused until ${notifier.blockedUntilText()}")
             return
@@ -132,6 +136,12 @@ class WebsiteDownloadViewModel @Inject constructor(
         val result = aaxImporter.websiteResults.first { it.asin == bookAsin }
         if (!result.ok) {
             serverSettings.websiteBackupAsins = serverSettings.websiteBackupAsins - bookAsin
+            if (result.needsSignIn) {
+                // Not a refusal: what was downloaded is kept, and signing in again continues it
+                notifier.promptBackupSignIn(bookTitle)
+                finishChain("Signed out of the Audible website while downloading \"$bookTitle\" — sign in again to continue")
+                return
+            }
             if (result.refused) {
                 val reason = result.error ?: "download refused"
                 requestLog.event("website-refused", "$bookAsin: $reason")
@@ -145,7 +155,13 @@ class WebsiteDownloadViewModel @Inject constructor(
             chainStatus = "Uploading \"$bookTitle\" to the server…"
             scheduler.enqueueLocalBackup()
             // The phone-copies backup uploads it, deletes the phone copy and clears it from the list
-            while (bookAsin in serverSettings.websiteBackupAsins) kotlinx.coroutines.delay(5_000)
+            while (bookAsin in serverSettings.websiteBackupAsins) {
+                if (serverSettings.uploadsPaused) {
+                    finishChain("The server stopped accepting uploads for today — \"$bookTitle\" and the rest continue tomorrow")
+                    return
+                }
+                kotlinx.coroutines.delay(5_000)
+            }
             backedUp++
         }
         pickNext()
@@ -176,7 +192,7 @@ class WebsiteDownloadViewModel @Inject constructor(
             // Listening before the import starts, so its result can't be missed
             viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { followUp(bookAsin, bookTitle) }
         }
-        aaxImporter.importFromWebsite(urls, userAgent, asin, title)
+        aaxImporter.importFromWebsite(urls, userAgent, asin, title, forBackup = chain)
     }
 
     /**

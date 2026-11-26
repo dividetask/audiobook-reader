@@ -68,8 +68,15 @@ import javax.inject.Inject
 class ServerLibraryViewModel @Inject constructor(
     val manager: RemoteLibraryManager,
     backupEngine: BackupEngine,
-    private val scheduler: BackupScheduler
+    private val scheduler: BackupScheduler,
+    private val serverSettings: com.dividetask.audiobookreader.remote.ServerSettings
 ) : ViewModel() {
+    /** "Uploads continue …" while the server's daily upload limit is reached; null otherwise. */
+    val pausedNote: String?
+        get() = if (serverSettings.uploadsPaused) "Server upload limit reached for today — uploads continue " +
+            java.text.SimpleDateFormat("EEE h:mm a", java.util.Locale.getDefault()).format(java.util.Date(serverSettings.uploadsPausedUntil))
+        else null
+
     /** Audible books the user asked to back up that haven't finished. */
     val requestedBooks: StateFlow<Set<String>> =
         scheduler.requestedBooks.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
@@ -158,6 +165,10 @@ fun ServerLibraryTab(
             IconButton(onClick = { manager.refresh() }, enabled = !isLoading) {
                 Icon(Icons.Default.Refresh, contentDescription = "Refresh")
             }
+        }
+        viewModel.pausedNote?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = 16.dp))
         }
         error?.let {
             Row(

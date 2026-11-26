@@ -34,13 +34,21 @@ import com.dividetask.audiobookreader.ui.settings.SettingsScreen
 fun AppNavigation(
     debugLog: AppDebugLog,
     openWebsiteBackup: Boolean = false,
-    onWebsiteBackupOpened: () -> Unit = {}
+    onWebsiteBackupOpened: () -> Unit = {},
+    openWebsiteDownload: String? = null,
+    onWebsiteDownloadOpened: () -> Unit = {}
 ) {
     val navController = rememberNavController()
     androidx.compose.runtime.LaunchedEffect(openWebsiteBackup) {
         if (openWebsiteBackup) {
             navController.navigate("website_backup")
             onWebsiteBackupOpened()
+        }
+    }
+    androidx.compose.runtime.LaunchedEffect(openWebsiteDownload) {
+        openWebsiteDownload?.let {
+            navController.navigate("website_download/$it")
+            onWebsiteDownloadOpened()
         }
     }
     val miniPlayer: MiniPlayerViewModel = hiltViewModel()

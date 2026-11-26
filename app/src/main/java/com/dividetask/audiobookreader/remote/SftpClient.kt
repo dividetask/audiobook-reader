@@ -37,7 +37,9 @@ class ServerException(
     message: String,
     cause: Throwable? = null,
     /** Wrong or missing settings (bucket, key, password…): retrying won't help until they change. */
-    val settingsProblem: Boolean = false
+    val settingsProblem: Boolean = false,
+    /** The storage stopped taking uploads for today (e.g. a Backblaze daily cap): try again tomorrow. */
+    val dailyLimit: Boolean = false
 ) : IOException(message, cause)
 
 val AUDIO_EXTENSIONS = setOf("m4b", "m4a", "mp3", "aac", "flac", "ogg", "opus", "wav", "aax")
