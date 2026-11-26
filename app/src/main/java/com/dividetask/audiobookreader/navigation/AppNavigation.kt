@@ -78,7 +78,8 @@ fun AppNavigation(
                         },
                         onWebsiteDownload = { asin ->
                             navController.navigate("website_download/$asin")
-                        }
+                        },
+                        onBookDetails = { asin -> navController.navigate("details/$asin") }
                     )
                 }
                 composable("website_backup") {

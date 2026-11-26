@@ -47,6 +47,9 @@ sealed interface BookListEntry<out T> {
     ) : BookListEntry<T>
 }
 
+/** Opens a book's details (description, narrators…) by its Audible ASIN; provided by the main screen. */
+val LocalOpenDetails = androidx.compose.runtime.staticCompositionLocalOf<((String) -> Unit)?> { null }
+
 /** One title in a series. [item] is this tab's entry for it, or null when the tab doesn't have it. */
 data class SeriesMember<out T>(
     val asin: String?,
@@ -245,8 +248,11 @@ fun SeriesPlaceholderItem(
     ) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (member.coverUrl != null) {
+                val openDetails = LocalOpenDetails.current
+                val asin = member.asin
                 AsyncImage(model = member.coverUrl, contentDescription = null,
-                    modifier = Modifier.size(56.dp).clip(RoundedCornerShape(4.dp)).alpha(0.5f),
+                    modifier = Modifier.size(56.dp).clip(RoundedCornerShape(4.dp)).alpha(0.5f)
+                        .then(if (openDetails != null && asin != null) Modifier.clickable { openDetails(asin) } else Modifier),
                     contentScale = ContentScale.Crop)
             } else {
                 Box(modifier = Modifier.size(56.dp), contentAlignment = Alignment.Center) {

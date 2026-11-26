@@ -98,7 +98,23 @@ fun MainScreen(
     onAudibleLogin: () -> Unit,
     onSettingsClick: () -> Unit,
     onWebsiteDownload: (asin: String) -> Unit,
+    onBookDetails: (asin: String) -> Unit = {},
     viewModel: MainViewModel = hiltViewModel()
+) {
+    // Tapping a book's cover in the Audible lists opens its details
+    androidx.compose.runtime.CompositionLocalProvider(com.dividetask.audiobookreader.ui.common.LocalOpenDetails provides onBookDetails) {
+        MainScreenContent(onBookClick, onAudibleLogin, onSettingsClick, onWebsiteDownload, viewModel)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MainScreenContent(
+    onBookClick: (Long) -> Unit,
+    onAudibleLogin: () -> Unit,
+    onSettingsClick: () -> Unit,
+    onWebsiteDownload: (asin: String) -> Unit,
+    viewModel: MainViewModel
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     val allLocalBooks by viewModel.localBooks.collectAsState()
@@ -1003,8 +1019,11 @@ private fun AudibleBookItem(
     Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (book.coverUrl != null) {
-                AsyncImage(model = book.coverUrl, contentDescription = null,
-                    modifier = Modifier.size(72.dp).clip(RoundedCornerShape(4.dp)),
+                // Tap the cover for the book's details and description
+                val openDetails = com.dividetask.audiobookreader.ui.common.LocalOpenDetails.current
+                AsyncImage(model = book.coverUrl, contentDescription = "Details",
+                    modifier = Modifier.size(72.dp).clip(RoundedCornerShape(4.dp))
+                        .then(if (openDetails != null) Modifier.clickable { openDetails(book.asin) } else Modifier),
                     contentScale = ContentScale.Crop)
             } else {
                 Box(modifier = Modifier.size(72.dp), contentAlignment = Alignment.Center) {
