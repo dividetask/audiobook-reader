@@ -31,11 +31,11 @@ All code optimizations and obfuscation are disabled for debuggable builds.
 > Task :app:extractProguardFiles UP-TO-DATE
 > Task :app:mergeDebugJniLibFolders UP-TO-DATE
 > Task :app:mergeDebugNativeLibs UP-TO-DATE
+> Task :app:processDebugManifestForPackage
 > Task :app:stripDebugDebugSymbols UP-TO-DATE
 > Task :app:validateSigningDebug UP-TO-DATE
 > Task :app:writeDebugAppMetadata UP-TO-DATE
 > Task :app:writeDebugSigningConfigVersions UP-TO-DATE
-> Task :app:processDebugManifestForPackage
 > Task :app:processDebugResources
 > Task :app:convertLinkedResourcesToProtoDebug
 > Task :app:kspDebugKotlin
@@ -58,5 +58,5 @@ w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 58s
+BUILD SUCCESSFUL in 54s
 41 actionable tasks: 17 executed, 24 up-to-date
