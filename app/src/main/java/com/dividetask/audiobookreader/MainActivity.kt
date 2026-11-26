@@ -1,6 +1,11 @@
 package com.dividetask.audiobookreader
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,9 +28,19 @@ class MainActivity : ComponentActivity() {
     /** Set when a "download stopped — sign in again" notification was tapped. */
     private val openWebsiteDownload = mutableStateOf<String?>(null)
 
+    // Android 13+: notifications (backup progress, "sign in again" prompts) need the user's permission
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        debugLog.log("APP", "Notification permission ${if (granted) "granted" else "denied"}")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (savedInstanceState == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         if (savedInstanceState == null) handleIntent(intent)
         setContent {
             AudiobookReaderTheme {

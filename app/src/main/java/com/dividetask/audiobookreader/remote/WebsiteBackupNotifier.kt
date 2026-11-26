@@ -89,6 +89,15 @@ class WebsiteBackupNotifier @Inject constructor(
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setAutoCancel(true)
+            // With sensitive content hidden, the lock screen shows only this
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(context, CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_sys_upload)
+                    .setContentTitle("Audiobook Reader")
+                    .setContentText("A download needs your attention")
+                    .build()
+            )
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             if (openAsin != null) putExtra(EXTRA_ASIN, openAsin) else if (openOnTap) putExtra(EXTRA_OPEN, true)
