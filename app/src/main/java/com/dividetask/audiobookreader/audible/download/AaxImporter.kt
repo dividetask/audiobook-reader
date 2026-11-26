@@ -871,7 +871,8 @@ class AaxImporter @Inject constructor(
                             e
                         }
                         // A dropped connection picks up where it stopped instead of failing the import
-                        broken?.let { resumeDownload(current, userAgent, dest, total, it, onProgress) }?.let { return it }
+                        broken?.let { resumeDownload(current, userAgent, dest, total, it, onProgress) { freshLink(url, userAgent) } }
+                            ?.let { return it }
                         // .aax files are MP4 containers: "ftyp" at byte 4
                         val header = ByteArray(8)
                         dest.inputStream().use { it.read(header) }
@@ -930,8 +931,12 @@ class AaxImporter @Inject constructor(
         dest: File,
         total: Long,
         first: java.io.IOException,
-        onProgress: (Float) -> Unit
+        onProgress: (Float) -> Unit,
+        /** A new link for the same file, for when [url] has expired; null if none. */
+        refresh: () -> String? = { null }
     ): String? {
+        var url = url
+        var refreshed = false
         var error: java.io.IOException = first
         for (attempt in 1..RESUME_ATTEMPTS) {
             val have = dest.length()
@@ -948,6 +953,18 @@ class AaxImporter @Inject constructor(
                     System.currentTimeMillis() - started, connection.contentLengthLong, "resume from $have")
                 // 206: the rest of the file; 200: the server ignored the range, so start over
                 val append = code == 206
+                // The file link is signed and expires (about an hour): get a new one once and carry on
+                if ((code == 401 || code == 403 || code == 410) && !refreshed) {
+                    refreshed = true
+                    val fresh = refresh()
+                    debugLog.log("IMPORT", "Download link expired (HTTP $code) — " +
+                        if (fresh != null) "got a new one, resuming from ${have / 1_048_576}MB" else "couldn't get a new one")
+                    if (fresh != null) {
+                        url = fresh
+                        error = java.io.IOException("link expired")
+                        continue
+                    }
+                }
                 if (code != 206 && code != 200) return "Download broke and couldn't be resumed (HTTP $code)"
                 connection.inputStream.use { input ->
                     java.io.FileOutputStream(dest, append).use { output ->
@@ -966,6 +983,38 @@ class AaxImporter @Inject constructor(
             }
         }
         return "Download kept breaking off: ${error.message}"
+    }
+
+    /**
+     * Follows the website's download link ([pageUrl], e.g. /library/download?asin=…) to the
+     * file's current signed link, without downloading it. Null if it doesn't lead to a file.
+     */
+    private fun freshLink(pageUrl: String, userAgent: String?): String? {
+        val cookies = android.webkit.CookieManager.getInstance()
+        var current = pageUrl
+        repeat(10) {
+            val connection = java.net.URL(current).openConnection() as java.net.HttpURLConnection
+            try {
+                connection.instanceFollowRedirects = false
+                cookies.getCookie(current)?.let { connection.setRequestProperty("Cookie", it) }
+                userAgent?.let { connection.setRequestProperty("User-Agent", it) }
+                connection.setRequestProperty("Range", "bytes=0-0")
+                val code = connection.responseCode
+                requestLog.request("website-download", "GET", current, code, null, null, "new link")
+                when (code) {
+                    in 300..399 -> current = java.net.URL(java.net.URL(current),
+                        connection.getHeaderField("Location") ?: return null).toString()
+                    200, 206 -> return current.takeIf { it != pageUrl }
+                    else -> return null
+                }
+            } catch (e: java.io.IOException) {
+                debugLog.log("IMPORT", "Couldn't get a new download link: ${e.message}")
+                return null
+            } finally {
+                connection.disconnect()
+            }
+        }
+        return null
     }
 
     private fun copyStream(input: java.io.InputStream, output: java.io.OutputStream, size: Long, alreadyHave: Long, onProgress: (Float) -> Unit) {
