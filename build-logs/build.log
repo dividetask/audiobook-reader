@@ -48,8 +48,8 @@ w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask
 > Task :app:hiltAggregateDepsDebug UP-TO-DATE
 > Task :app:hiltJavaCompileDebug
 > Task :app:processDebugJavaRes UP-TO-DATE
-> Task :app:transformDebugClassesWithAsm
 > Task :app:mergeDebugJavaResource UP-TO-DATE
+> Task :app:transformDebugClassesWithAsm
 > Task :app:mergeDebugGeneratedProguardFiles UP-TO-DATE
 > Task :app:minifyDebugWithR8
 > Task :app:shrinkDebugRes
@@ -58,5 +58,5 @@ w: file:///home/brett/Projects/audiobook-reader/app/src/main/java/com/dividetask
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 52s
+BUILD SUCCESSFUL in 58s
 41 actionable tasks: 17 executed, 24 up-to-date
